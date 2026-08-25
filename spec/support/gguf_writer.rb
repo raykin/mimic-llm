@@ -1,7 +1,7 @@
-# Minimal GGUF v3 writer covering only what Model::Schema.read_metadata parses:
+# Minimal GGUF v3 writer covering only what Model::Gguf#metadata parses:
 # magic, version, tensor count, then N key/value pairs. Types used here are
 # STRING (8) and UINT32 (4), matching what the real header carries for the
-# keys Model::Schema and Model::Vram care about.
+# keys Model::Header and Model::Footprint care about.
 module GgufWriter
   UINT32 = 4
   FLOAT32 = 6

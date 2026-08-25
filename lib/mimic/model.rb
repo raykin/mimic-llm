@@ -1,10 +1,9 @@
 require "pathname"
-require_relative "model/schema"
 require_relative "llm_config"
 require_relative "paths"
-require_relative "model/vram"
-require_relative "model/store"
+require_relative "model/footprint"
 require_relative "model/header"
+require_relative "model/memory"
 
 module Mimic
   # A GGUF on disk together with the multimodal projector that belongs to it.
@@ -14,8 +13,6 @@ module Mimic
   # with --mmproj. The projector cannot run on its own, so a scan pairs it
   # onto its model rather than listing it as one.
   class Model
-    N_CPU_MOE_PATH = Paths::LLM_ROOT / "ik-n-cpu-moe.json"
-
     class << self
       # llama.cpp's own convert/clip.cpp mark a projector GGUF with
       # general.type == "mmproj" -- naming (mmproj-prefixed, mmproj-suffixed,
@@ -55,7 +52,7 @@ module Mimic
     def real = @real ||= path.realpath
     def model_alias = @model_alias ||= LlmConfig::Settings.alias_for(path.to_s)
     def vision? = !projector.nil?
-    def embedding? = @embedding ||= Schema.embedding?(real.to_s) == true
+    def embedding? = @embedding ||= header.embedding? == true
 
     def projector
       return @projector if defined?(@projector)
@@ -63,78 +60,24 @@ module Mimic
       @projector = self.class.projector_for(path)
     end
 
-    def last_ctx
-      entry = ctx_store.fetch(path.to_s)
-      entry && [entry["context_length"], entry["cache_type"]]
-    end
+    def memory = @memory ||= Memory.new(path, header)
 
-    def remember_ctx(context_length, cache_type)
-      ctx_store.write(path.to_s, "context_length" => context_length, "cache_type" => cache_type)
-    end
+    def supports_mtp? = header.supports_mtp?
 
-    def compute_mib(ctx, cache_type)
-      (compute_store.fetch(path.to_s) || {})[compute_key(ctx, cache_type)]
-    end
-
-    def remember_compute(ctx, cache_type, mib)
-      entry = compute_store.fetch(path.to_s) || {}
-      entry[compute_key(ctx, cache_type)] = mib
-      compute_store.write(path.to_s, entry)
-    end
-
-    # What to launch with: the values the last successful run under this
-    # reasoning choice was given, or -- before there is one -- the publisher's
-    # suggestion from the header over the hardcoded defaults.
-    def sampling_for(reasoning:)
-      last_sampling(reasoning: reasoning) || resolved_sampling
-    end
-
-    def last_sampling(reasoning:)
-      entry = sampling_store.fetch(path.to_s)
-      entry["values"] if entry && entry["reasoning"] == reasoning
-    end
-
-    def remember_sampling(reasoning, values)
-      sampling_store.write(path.to_s, "reasoning" => reasoning, "values" => values)
-    end
-
-    def forget_sampling = sampling_store.delete(path.to_s)
-
-    def n_cpu_moe = n_cpu_moe_store.fetch(path.to_s)
-    def remember_n_cpu_moe(value) = n_cpu_moe_store.write(path.to_s, value)
-    def forget_n_cpu_moe = n_cpu_moe_store.delete(path.to_s)
-
-    # Return an estimate hash, or nil when it can't be computed (no GPU / parse fail).
-    #
-    # Keys: fits, need_mib, budget_mib, total_mib, weights_mib, kv_mib, max_ctx.
-    def preflight(ctx, cache_type, compute_mib: nil)
-      elems = Vram.kv_elems_per_token(header.metadata)
-      total = Vram.gpu_total_mib
-      return nil if elems.nil? || total.nil?
-
-      compute = compute_mib || Vram.compute_default(total)
-      per_tok_mib = elems * Vram::CACHE_BPE.fetch(cache_type, 2.0) / 1024 / 1024
-      weights_mib = (File.size(path) + projector_bytes) / 1024.0 / 1024.0
-      kv_mib = per_tok_mib * ctx
-      need_mib = weights_mib + kv_mib + compute
-      budget = total - Vram::DESKTOP_RESERVE_MIB
-      max_ctx = per_tok_mib.zero? ? 0 : ((budget - weights_mib - compute) / per_tok_mib).to_i
-      {
-        fits: need_mib <= budget,
-        need_mib: need_mib,
-        budget_mib: budget,
-        total_mib: total,
-        weights_mib: weights_mib,
-        kv_mib: kv_mib,
-        max_ctx: [0, max_ctx].max,
-      }
-    rescue Errno::ENOENT, ArgumentError, EOFError
-      nil
+    def footprint(ctx, cache_type, compute_mib: nil)
+      Footprint.new(header, ctx: ctx, cache_type: cache_type,
+                            weights_bytes: weights_bytes, compute_mib: compute_mib)
     end
 
     private
 
     def header = @header ||= Header.new(path)
+
+    def weights_bytes
+      File.size(path) + projector_bytes
+    rescue SystemCallError
+      nil
+    end
 
     # A vision model's projector is loaded onto the GPU with --mmproj, so it
     # spends VRAM the decoder's own file size does not account for.
@@ -143,18 +86,5 @@ module Mimic
     rescue SystemCallError
       0
     end
-
-    def compute_key(ctx, cache_type) = "#{ctx}:#{cache_type}"
-
-    def resolved_sampling
-      LlmConfig::Sampling.resolve(header.metadata)
-    rescue ArgumentError, SystemCallError, IOError
-      LlmConfig::Sampling::DEFAULTS
-    end
-
-    def ctx_store = Store.new(LlmConfig::MODEL_CTX_PATH)
-    def sampling_store = Store.new(LlmConfig::MODEL_SAMPLING_PATH)
-    def compute_store = Store.new(LlmConfig::MODEL_COMPUTE_PATH)
-    def n_cpu_moe_store = Store.new(N_CPU_MOE_PATH)
   end
 end

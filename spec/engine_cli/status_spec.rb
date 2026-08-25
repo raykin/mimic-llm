@@ -43,7 +43,7 @@ RSpec.describe Mimic::EngineCli::Status do
         rendered = capture { status(ik_config).print }
 
         expect(rendered).to match(/Context:\s+120,000/)
-        expect(rendered).to match(/KV cache: q4_0/)
+        expect(rendered).to match(/KV cache:\s+q4_0/)
         expect(rendered).not_to include("couldn't confirm")
       end
     end
@@ -80,8 +80,62 @@ RSpec.describe Mimic::EngineCli::Status do
         rendered = capture { described_class.new(settings).print }
 
         expect(rendered).to match(/Context:\s+160,000/)
-        expect(rendered).to match(/KV cache: q4_0/)
+        expect(rendered).to match(/KV cache:\s+q4_0/)
         expect(rendered).to match(/CPU MoE:\s+12 layers/)
+      end
+    end
+
+    it "reports vision, reasoning and sampling from the ik launch record" do
+      record = "llama-server -c 160000 -ctk q8_0 -np 1 --reasoning off --mmproj /m/mmproj-F16.gguf " \
+               "--temp 0.6 --top-k 20 --top-p 0.95 --min-p 0.0 --presence-penalty 1.5 --repeat-penalty 1.05"
+      with_launch_record(record) do
+        rendered = capture { status(ik_config).print }
+
+        expect(rendered).to match(%r{Vision:\s+on \(mmproj-F16\.gguf\)})
+        expect(rendered).to match(/Reasoning:\s+off/)
+        expect(rendered).to match(/Sampling:\s+temp 0\.6\s+top-p 0\.95\s+top-k 20\s+min-p 0\.0\s+presence 1\.5\s+repeat 1\.05/)
+      end
+    end
+
+    it "says vision is off when the running server was launched without a projector" do
+      with_launch_record("llama-server -c 160000 -ctk q8_0 -np 1") do
+        expect { status(ik_config).print }.to output(/Vision:\s+off/).to_stdout
+      end
+    end
+
+    # llama.cpp's router re-emits the preset's `temp` key as `--temperature`,
+    # while ik's launch record keeps the `--temp` spelling the engine was
+    # given. Reading only one of them shows the config value on the other.
+    it "accepts the --temperature spelling llama.cpp reports" do
+      Dir.mktmpdir do |dir|
+        allow(Mimic::Engine::Base).to receive(:pid_file).and_return(Pathname.new(dir) / "absent.pid")
+        allow(Mimic::Util::Probes).to receive(:http_json).and_return(
+          { "data" => [{ "id" => "model", "status" => { "value" => "loaded",
+                                                        "args" => ["--ctx-size", "8192", "--temperature", "1.0",
+                                                                   "--reasoning", "auto",
+                                                                   "--mmproj", "/m/mmproj-F32.gguf"] } }] }
+        )
+        cfg = { "model" => { "path" => "/m/model-Q4_K_M.gguf", "context_length" => 4096, "reasoning" => "off" },
+                "llama" => { "engine" => "llama.cpp", "cache_type" => "q8_0", "port" => 8080, "n_slots" => 1 } }
+        rendered = capture { status(cfg).print }
+
+        expect(rendered).to match(/Sampling:\s+temp 1\.0/)
+        expect(rendered).to match(/Reasoning:\s+auto/)
+        expect(rendered).to match(%r{Vision:\s+on \(mmproj-F32\.gguf\)})
+      end
+    end
+
+    it "falls back to the configured reasoning and sampling when the server is stopped" do
+      Dir.mktmpdir do |dir|
+        allow(Mimic::Util::Probes).to receive(:http_ok).and_return(false)
+        allow(Mimic::Engine::Base).to receive(:pid_file).and_return(Pathname.new(dir) / "absent.pid")
+        cfg = ik_config
+        cfg["model"] = cfg["model"].merge("reasoning" => "off")
+        rendered = capture { status(cfg).print }
+
+        expect(rendered).to match(/Reasoning:\s+off/)
+        expect(rendered).to match(/Sampling:\s+temp 0\.8\s+top-p 0\.95\s+top-k 40/)
+        expect(rendered).to match(/Vision:\s+off/)
       end
     end
 

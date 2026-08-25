@@ -65,4 +65,62 @@ RSpec.describe Mimic::Util::Host do
       expect(described_class.llama_server).to be_nil
     end
   end
+  # nvidia-smi is the only source for these; a box without it answers nil
+  # rather than raising, since every caller treats "no GPU" as unknowable.
+  describe ".gpu_total_mib" do
+    def smi(output, success:)
+      allow(Open3).to receive(:capture2).and_return([output, instance_double(Process::Status, success?: success)])
+    end
+
+    it "reads the card's total memory in MiB" do
+      smi("24576\n", success: true)
+
+      expect(described_class.gpu_total_mib).to eq(24_576)
+    end
+
+    it "is nil when nvidia-smi fails" do
+      smi("", success: false)
+
+      expect(described_class.gpu_total_mib).to be_nil
+    end
+
+    it "is nil when nvidia-smi is not installed" do
+      allow(Open3).to receive(:capture2).and_raise(Errno::ENOENT)
+
+      expect(described_class.gpu_total_mib).to be_nil
+    end
+
+    it "is nil when the output is not a number" do
+      smi("[N/A]\n", success: true)
+
+      expect(described_class.gpu_total_mib).to be_nil
+    end
+  end
+
+  describe ".gpu_process_mib" do
+    def compute_apps(output)
+      allow(Open3).to receive(:capture2).and_return([output, instance_double(Process::Status, success?: true)])
+    end
+
+    # The engine that owns the CUDA context is not always the process we
+    # spawned -- llama.cpp's router loads each model in a child -- so every
+    # listed pid counts.
+    it "sums the VRAM held by every listed pid" do
+      compute_apps("41, 100\n42, 250\n99, 900\n")
+
+      expect(described_class.gpu_process_mib([41, 42])).to eq(350)
+    end
+
+    it "is nil when none of the pids is on the GPU" do
+      compute_apps("99, 900\n")
+
+      expect(described_class.gpu_process_mib([42])).to be_nil
+    end
+
+    it "is nil when nvidia-smi fails" do
+      allow(Open3).to receive(:capture2).and_return(["", instance_double(Process::Status, success?: false)])
+
+      expect(described_class.gpu_process_mib([42])).to be_nil
+    end
+  end
 end

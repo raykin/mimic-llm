@@ -1,23 +1,38 @@
 require "pathname"
+require_relative "../../lib/mimic/paths"
 
-# Fails any spec that writes under the user's real ~/.llm.
+# Fails any spec that writes to, or deletes from, the user's real state --
+# ~/.llm, ~/.mimic, the pid dir the running servers are tracked by, and the
+# config trees `llm sync` writes on other tools' behalf.
 #
 # Isolation is per-spec: each store constant is named in a stub_const, so a
 # store added to a path the suite already exercises writes the live tree
-# until someone spots it. The root is captured from Dir.home rather than from
-# Paths::LLM_ROOT, which specs legitimately stub at a tmpdir.
+# until someone spots it. The llm root is captured from Dir.home rather than
+# from Paths::LLM_ROOT, which specs legitimately stub at a tmpdir; PID_DIR is
+# read from Paths so the guard cannot drift from the constant it protects.
+#
+# The client roots are listed here rather than read off Client::* constants:
+# a spec that stubs one of those constants would move the guard with it, and
+# the guard's whole job is to stay pointed at the real path.
 module RealLlmRootGuard
   Violation = Class.new(StandardError)
 
-  ROOT = (Pathname.new(Dir.home) / ".llm").to_s
+  CLIENT_ROOTS = %w[.config/crush .config/opencode .config/goose .pi/agent .hermes].freeze
+
+  ROOTS = [
+    (Pathname.new(Dir.home) / ".llm").to_s,
+    (Pathname.new(Dir.home) / ".mimic").to_s,
+    Mimic::Paths::PID_DIR.to_s,
+    *CLIENT_ROOTS.map { |dir| (Pathname.new(Dir.home) / dir).to_s },
+  ].freeze
 
   WRITE_MODES = /[wa+]/
 
   class << self
     def guard(path, action)
-      return unless path.to_s == ROOT || path.to_s.start_with?("#{ROOT}/")
+      return unless ROOTS.any? { |root| path.to_s == root || path.to_s.start_with?("#{root}/") }
 
-      raise Violation, "spec tried to #{action} the user's real llm root: #{path}"
+      raise Violation, "spec tried to #{action} the user's real state: #{path}"
     end
   end
 
@@ -38,6 +53,16 @@ module RealLlmRootGuard
 
   def rename(*)
     RealLlmRootGuard.guard(self, "rename")
+    super
+  end
+
+  def unlink(*)
+    RealLlmRootGuard.guard(self, "delete")
+    super
+  end
+
+  def delete(*)
+    RealLlmRootGuard.guard(self, "delete")
     super
   end
 

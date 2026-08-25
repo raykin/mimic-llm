@@ -5,6 +5,15 @@ require "tmpdir"
 require "fileutils"
 
 RSpec.describe Mimic::LlmCli::Wizard::Setup do
+  around do |example|
+    Dir.mktmpdir do |dir|
+      @packing_store = Pathname.new(dir) / "model-packing.json"
+      example.run
+    end
+  end
+
+  before { stub_const("Mimic::Model::Memory::TERNARY_PACKING_PATH", @packing_store) }
+
   def wizard(cfg = { "model" => {}, "llama" => {} }, prompt: instance_double(Mimic::Ui::Prompt))
     described_class.new(Mimic::LlmConfig::Settings.new(cfg), prompt: prompt)
   end
@@ -52,34 +61,14 @@ RSpec.describe Mimic::LlmCli::Wizard::Setup do
     end
   end
 
-  describe "#chat_models" do
+  describe "#report_hidden_models" do
     def models_dir
       root = Pathname.new(Dir.mktmpdir)
       GgufWriter.write(root / "plain.gguf", { "general.architecture" => "llama" },
                        tensors: [["blk.0.attn_q.weight", 4096, 12, 4096]])
       GgufWriter.write(root / "bonsai-g128.gguf", { "general.architecture" => "qwen35" },
                        tensors: [["blk.0.attn_q.weight", 34_000, 42, 128_000]])
-      GgufWriter.write(root / "bonsai-g64.gguf", { "general.architecture" => "qwen35" },
-                       tensors: [["blk.0.attn_q.weight", 18_000, 42, 64_000]])
       root
-    end
-
-    def offered(engine, root)
-      stub_const("Mimic::LlmConfig::BUILTIN_MODEL_DIRS", [root])
-      cfg = { "model" => { "search_paths" => [] }, "llama" => { "engine" => engine } }
-      wizard(cfg).chat_models.map { |m| m.path.basename.to_s }
-    end
-
-    it "hides the fork's ternary packing from upstream llama.cpp" do
-      root = models_dir
-
-      expect(offered("llama.cpp", root)).to contain_exactly("plain.gguf", "bonsai-g64.gguf")
-    end
-
-    it "offers the prism fork only its own G128 ternary models, not plain GGUFs too" do
-      root = models_dir
-
-      expect(offered("prism-llama.cpp", root)).to contain_exactly("bonsai-g128.gguf")
     end
 
     it "names the models it hid rather than letting them vanish" do
@@ -93,12 +82,6 @@ RSpec.describe Mimic::LlmCli::Wizard::Setup do
         .to output(/hidden .*bonsai-g128\.gguf/).to_stdout
     end
 
-    it "hides every ternary packing from ik_llama.cpp, which has no Q2_0 at all" do
-      root = models_dir
-
-      expect(offered("ik_llama.cpp", root)).to contain_exactly("plain.gguf")
-    end
-
     it "explains a plain GGUF hidden from prism as not-Prism-exclusive, not unreadable" do
       root = models_dir
       stub_const("Mimic::LlmConfig::BUILTIN_MODEL_DIRS", [root])
@@ -108,68 +91,6 @@ RSpec.describe Mimic::LlmCli::Wizard::Setup do
 
       expect { wizard(cfg, prompt: prompt).choose_model }
         .to output(/hidden -- not a Prism G128 ternary model.*plain\.gguf/).to_stdout
-    end
-  end
-
-  describe "#scan_gguf" do
-    # The picker must not offer a model whose symlink target is gone --
-    # choosing it dies with "Model file not found" and exits the wizard.
-    it "skips a dangling symlink" do
-      Dir.mktmpdir do |dir|
-        root = Pathname.new(dir)
-        FileUtils.touch(root / "real.gguf")
-        (root / "gone.gguf").make_symlink(root / "deleted.gguf")
-        stub_const("Mimic::LlmConfig::BUILTIN_MODEL_DIRS", [])
-
-        found = wizard({ "model" => { "search_paths" => [root.to_s] } }).scan_gguf
-
-        expect(found.map { |m| m.path.to_s }).to eq([(root / "real.gguf").to_s])
-      end
-    end
-
-    it "collects .gguf files from every scan dir that exists" do
-      Dir.mktmpdir do |tmp|
-        root = Pathname.new(tmp)
-        FileUtils.touch(root / "b.gguf")
-        FileUtils.touch(root / "a.gguf")
-        stub_const("Mimic::LlmConfig::BUILTIN_MODEL_DIRS", [root])
-
-        expect(wizard.scan_gguf.map { |m| m.path.to_s })
-          .to eq([(root / "a.gguf").to_s, (root / "b.gguf").to_s])
-      end
-    end
-
-    it "skips scan dirs that don't exist" do
-      dir = instance_double(Pathname, directory?: false)
-      stub_const("Mimic::LlmConfig::BUILTIN_MODEL_DIRS", [dir])
-      expect(wizard.scan_gguf).to eq([])
-    end
-
-    it "scans the dirs LlmConfig resolves, recursively" do
-      Dir.mktmpdir do |dir|
-        root = Pathname.new(dir)
-        (root / "nested").mkpath
-        FileUtils.touch(root / "nested/model.gguf")
-        stub_const("Mimic::LlmConfig::BUILTIN_MODEL_DIRS", [])
-
-        found = wizard({ "model" => { "search_paths" => [root.to_s] } }).scan_gguf
-
-        expect(found.map { |m| m.path.to_s }).to eq([(root / "nested/model.gguf").to_s])
-      end
-    end
-
-    it "attaches an mmproj file to its model instead of listing it as one" do
-      Dir.mktmpdir do |dir|
-        root = Pathname.new(dir)
-        FileUtils.touch(root / "model.gguf")
-        GgufWriter.write(root / "mmproj-model.gguf", { "general.type" => "mmproj" })
-        stub_const("Mimic::LlmConfig::BUILTIN_MODEL_DIRS", [root])
-
-        found = wizard.scan_gguf
-
-        expect(found.map { |m| m.path.basename.to_s }).to contain_exactly("model.gguf")
-        expect(found.first.projector).to eq(root / "mmproj-model.gguf")
-      end
     end
   end
 
@@ -220,7 +141,7 @@ RSpec.describe Mimic::LlmCli::Wizard::Setup do
         path.dirname.mkpath
         FileUtils.touch(path)
         stub_const("Mimic::LlmConfig::BUILTIN_MODEL_DIRS", [])
-        allow(Mimic::Model::Schema).to receive(:moe?).with(path.realpath.to_s, meta: anything).and_return(moe)
+        allow_any_instance_of(Mimic::Model::Header).to receive(:moe?).and_return(moe)
         prompt = instance_double(Mimic::Ui::Prompt)
         allow(prompt).to receive(:select) { |_, choices, **| choices.first }
         cfg = { "model" => { "search_paths" => [(path.dirname.dirname).to_s] }, "llama" => {} }
@@ -258,19 +179,6 @@ RSpec.describe Mimic::LlmCli::Wizard::Setup do
 
         expect(prompt).to have_received(:select)
           .with("GGUF model file:", ["sub/chat-Q4_K_M.gguf", "Enter a path manually..."], any_args)
-      end
-    end
-  end
-
-  describe "#embedding_models" do
-    it "keeps only the embedding models the scan found" do
-      Dir.mktmpdir do |dir|
-        root = Pathname.new(dir)
-        GgufWriter.write(root / "chat-Q4_K_M.gguf", { "general.architecture" => "qwen3", "qwen3.block_count" => 48 })
-        GgufWriter.write(root / "bge-m3-Q8_0.gguf", { "general.architecture" => "bert", "bert.attention.causal" => 0 })
-        stub_const("Mimic::LlmConfig::BUILTIN_MODEL_DIRS", [root])
-
-        expect(wizard.embedding_models.map { |m| m.path.basename.to_s }).to eq(["bge-m3-Q8_0.gguf"])
       end
     end
   end
@@ -337,13 +245,10 @@ RSpec.describe Mimic::LlmCli::Wizard::Setup do
     before do
       stub_const("Mimic::LlmConfig::MODEL_CTX_PATH", @dir / "model-ctx.json")
       stub_const("Mimic::LlmConfig::MODEL_COMPUTE_PATH", @dir / "model-compute.json")
-      stub_const("Mimic::Model::N_CPU_MOE_PATH", @dir / "ik-n-cpu-moe.json")
+      stub_const("Mimic::Model::Memory::N_CPU_MOE_PATH", @dir / "ik-n-cpu-moe.json")
     end
 
     def cfg = { "model" => { "path" => "/m.gguf", "context_length" => 1000 }, "llama" => { "cache_type" => "q8_0" } }
-
-    def ik_cfg = { "model" => { "path" => "/m.gguf", "context_length" => 1000 },
-                   "llama" => { "cache_type" => "q8_0", "engine" => "ik_llama.cpp" } }
 
     def picking_prompt
       instance_double(Mimic::Ui::Prompt).tap do |prompt|
@@ -351,82 +256,31 @@ RSpec.describe Mimic::LlmCli::Wizard::Setup do
       end
     end
 
-    it "accepts without prompting when the estimate can't be computed" do
-      allow_any_instance_of(Mimic::Model).to receive(:preflight).and_return(nil)
-
-      expect { wizard(cfg, prompt: picking_prompt).choose_context }.not_to raise_error
-    end
-
-    # A past launch measured what this model really costs beyond weights+KV;
-    # the preflight budgets against that instead of Model::Vram.compute_default.
-    it "passes the measured compute cost to the estimate when one was recorded" do
-      Mimic::Model.new("/m.gguf").remember_compute(60_000, "q8_0", 1712)
-      expect_any_instance_of(Mimic::Model).to receive(:preflight)
-        .with(anything, anything, compute_mib: 1712)
-        .and_return(fits: true, need_mib: 1000, total_mib: 24_000, max_ctx: 5000)
-
-      expect { wizard(cfg, prompt: picking_prompt).choose_context }.to output(/VRAM ok/).to_stdout
-    end
-
-    it "accepts without prompting when the estimate fits" do
-      allow_any_instance_of(Mimic::Model).to receive(:preflight)
-        .and_return(fits: true, need_mib: 1000, total_mib: 24_000, max_ctx: 5000)
+    it "keeps the preset the preflight accepted" do
+      allow_any_instance_of(Mimic::LlmCli::Wizard::ContextPreflight).to receive(:ok?).and_return(true)
 
       settings = nil
-      expect { settings = wizard(cfg, prompt: picking_prompt).choose_context }.to output(/VRAM ok/).to_stdout
+      expect { settings = wizard(cfg, prompt: picking_prompt).choose_context }.to output.to_stdout
+
       expect(settings.model.context_length).to eq(60_000)
     end
 
-    # A MoE model has a lever the warning never offered: move experts to the
-    # CPU until the rest fits. Only ik_llama takes --n-cpu-moe.
-    it "offloads MoE experts instead of warning when that closes the gap" do
-      allow_any_instance_of(Mimic::Model).to receive(:preflight).and_return(
-        { fits: false, need_mib: 23_100, weights_mib: 19_000, kv_mib: 2_000, budget_mib: 22_528, total_mib: 24_576, max_ctx: 140_000 },
-      )
-      allow(Mimic::Model::Vram).to receive(:layers_to_offload).and_return(2)
+    it "re-picks until the preflight accepts" do
+      allow_any_instance_of(Mimic::LlmCli::Wizard::ContextPreflight).to receive(:ok?).and_return(false, true)
       prompt = picking_prompt
 
-      expect { wizard(ik_cfg, prompt: prompt).choose_context }.to output(/offloading 2 layer/).to_stdout
+      expect { wizard(cfg, prompt: prompt).choose_context }.to output.to_stdout
 
-      expect(Mimic::Model.new("/m.gguf").n_cpu_moe).to eq(2)
-      expect(prompt).to have_received(:select).once
-    end
-
-    it "still warns when offloading cannot close the gap" do
-      allow_any_instance_of(Mimic::Model).to receive(:preflight).and_return(
-        { fits: false, need_mib: 40_000, weights_mib: 30_000, kv_mib: 8_000, budget_mib: 22_528, total_mib: 24_576, max_ctx: 500 },
-        { fits: true, need_mib: 1000, total_mib: 24_576, max_ctx: 5000 },
-      )
-      allow(Mimic::Model::Vram).to receive(:layers_to_offload).and_return(nil)
-      prompt = picking_prompt
-      allow(prompt).to receive(:yes?).and_return(false)
-
-      expect { wizard(ik_cfg, prompt: prompt).choose_context }.to output(/won't fully fit VRAM/).to_stdout
-    end
-
-    it "warns rather than offloading on llama.cpp, which is all-GPU by design" do
-      allow_any_instance_of(Mimic::Model).to receive(:preflight).and_return(
-        { fits: false, need_mib: 23_100, weights_mib: 19_000, kv_mib: 2_000, budget_mib: 22_528, total_mib: 24_576, max_ctx: 140_000 },
-        { fits: true, need_mib: 1000, total_mib: 24_576, max_ctx: 5000 },
-      )
-      allow(Mimic::Model::Vram).to receive(:layers_to_offload).and_return(2)
-      prompt = picking_prompt
-      allow(prompt).to receive(:yes?).and_return(false)
-
-      expect { wizard(cfg, prompt: prompt).choose_context }.to output(/won't fully fit VRAM/).to_stdout
-      expect(Mimic::Model::Vram).not_to have_received(:layers_to_offload)
-    end
-
-    it "re-picks when the user declines an over-committed context" do
-      allow_any_instance_of(Mimic::Model).to receive(:preflight).and_return(
-        { fits: false, need_mib: 30_000, weights_mib: 20_000, kv_mib: 8_000, budget_mib: 23_000, total_mib: 24_000, max_ctx: 500 },
-        { fits: true, need_mib: 1000, total_mib: 24_000, max_ctx: 5000 },
-      )
-      prompt = picking_prompt
-      allow(prompt).to receive(:yes?).and_return(false)
-
-      expect { wizard(cfg, prompt: prompt).choose_context }.to output(/won't fully fit VRAM/).to_stdout
       expect(prompt).to have_received(:select).twice
+    end
+
+    it "starts from the last good run for this model" do
+      Mimic::Model.new("/m.gguf").memory.remember_ctx(80_000, "q4_0")
+      allow_any_instance_of(Mimic::LlmCli::Wizard::ContextPreflight).to receive(:ok?).and_return(true)
+      prompt = picking_prompt
+
+      expect { wizard(cfg, prompt: prompt).choose_context }
+        .to output(/Last good run for this model: 80,000 \/ q4_0/).to_stdout
     end
   end
 

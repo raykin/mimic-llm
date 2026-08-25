@@ -10,10 +10,10 @@ module Mimic
       # preset's own keys re-dashed into the flags the router expands them to
       # in /v1/models. Only the three observed there are listed -- notably no
       # n_cpu_moe, which is how `llm status` knows to leave the line off.
-      ARG_FLAGS = %i[ctx cache_type n_slots].to_h { |key| [key, "--#{EngineCli::LlamaPreset::KEYS.fetch(key)}"] }.freeze
+      ARG_FLAGS = %i[ctx cache_type n_slots mmproj reasoning].to_h { |key| [key, "--#{EngineCli::LlamaPreset::KEYS.fetch(key)}"] }.freeze
 
       # argv of the actually-running instance, straight from the router's own
-      # /v1/models -- config.yaml can be stale (e.g. `llm benchmark` overrides
+      # /v1/models -- config.yaml can be stale (e.g. `llm parallel` overrides
       # ctx/slots without persisting them).
       def live_args
         data = Util::Probes.http_json(models_url)
@@ -39,12 +39,12 @@ module Mimic
         return Result.error(missing) if missing
 
         render_preset
-        log_offset = self.class.log_file.exist? ? self.class.log_file.size : 0
+        log_offset = process.log_size
         pid = launcher.spawn(build_command(binary))
 
         unless Util::Probes.wait_ready(models_url, alive: -> { Util::Probes.child_alive?(pid) }, label: "waiting for llama-server")
-          Base.cleanup_failed(pid)
-          return Result.error("llama-server failed to start -- see #{self.class.log_file}\n#{Base.last_lines(Base.log_tail(log_offset))}")
+          process.cleanup_failed(pid)
+          return Result.error("llama-server failed to start -- see #{process.log_file}\n#{process.last_lines(process.log_tail(log_offset))}")
         end
 
         failure = []
@@ -63,11 +63,11 @@ module Mimic
           return Result.ok("llama-server ready, model loaded (pid #{pid})")
         end
 
-        Base.cleanup_failed(pid)
-        tail = Base.last_lines(Base.log_tail(log_offset))
-        return Result.error("#{failure.first} -- see #{self.class.log_file}\n#{tail}") unless failure.empty?
+        process.cleanup_failed(pid)
+        tail = process.last_lines(process.log_tail(log_offset))
+        return Result.error("#{failure.first} -- see #{process.log_file}\n#{tail}") unless failure.empty?
 
-        Result.error("model failed to load -- see #{self.class.log_file}\n#{tail}")
+        Result.error("model failed to load -- see #{process.log_file}\n#{tail}")
       end
 
       private
@@ -89,7 +89,7 @@ module Mimic
       # attempts run out. The child's exit is only ever reported in the
       # shared log.
       def instance_failure(log_offset)
-        tail = Base.log_tail(log_offset)
+        tail = process.log_tail(log_offset)
         return nil unless tail.include?("instance name=#{model_alias} exited with status 1")
 
         if tail.include?("cudaMalloc failed: out of memory") || tail.include?("failed to allocate")

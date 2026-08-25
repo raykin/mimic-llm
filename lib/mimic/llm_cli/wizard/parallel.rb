@@ -1,13 +1,14 @@
 require_relative "../../ui"
 require_relative "../../util/fmt"
-require_relative "../../model/vram"
+require_relative "../../model/footprint"
 
 module Mimic
   module LlmCli
     module Wizard
-      # Pick an n_slots/ctx-per-request pair for throughput testing. Total
-      # ctx-size is the product, and that is what has to fit in VRAM.
-      class Benchmark
+      # Pick an n_slots/ctx-per-request pair so the server can hold several
+      # requests at once. Total ctx-size is the product, and that is what has
+      # to fit in VRAM.
+      class Parallel
         CTX_PRESETS = {
           "2048 -- short prompts, max concurrency" => 2048,
           "4096 -- humaneval-rb-sized prompts" => 4096,
@@ -24,7 +25,7 @@ module Mimic
         end
 
         def run
-          Ui.banner("llm -- benchmark wizard")
+          Ui.banner("llm -- parallel wizard")
 
           step(1, "Model")
           @config.model.path = @setup_wizard.select_model(@config.model.path)
@@ -58,9 +59,9 @@ module Mimic
         def fit_line(ctx_per_slot, slots)
           total = ctx_per_slot * slots
           model = @config.model.file
-          est = model.preflight(total, @config.llama.cache_type,
-                                compute_mib: model.compute_mib(total, @config.llama.cache_type))
-          tag = est.nil? || est[:fits] ? Ui.green("fits") : Ui.red("too big")
+          est = model.footprint(total, @config.llama.cache_type,
+                                compute_mib: model.memory.compute_mib(total, @config.llama.cache_type))
+          tag = !est.measurable? || est.fits? ? Ui.green("fits") : Ui.red("too big")
           format("  %2d slots -> %10s total ctx  %s", slots, Util::Fmt.commas(total), tag)
         end
 

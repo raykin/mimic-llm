@@ -74,14 +74,14 @@ module Mimic
       end
 
       def remember_ctx
-        model.file.remember_ctx(model.context_length, llama.cache_type)
+        model.file.memory.remember_ctx(model.context_length, llama.cache_type)
       end
 
       def remember_sampling
-        model.file.remember_sampling(model.reasoning, model.file.sampling_for(reasoning: model.reasoning))
+        model.file.memory.remember_sampling(model.reasoning, model.file.memory.sampling_for(reasoning: model.reasoning))
       end
 
-      def forget_sampling = model.file.forget_sampling
+      def forget_sampling = model.file.memory.forget_sampling
 
       def search_paths = SearchPaths.new(@cfg)
       def embed = @embed ||= Embed.new(@cfg["embed"] ||= {}, host: llama.host)

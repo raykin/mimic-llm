@@ -10,6 +10,16 @@ module Mimic
     class Base < Thor
       def self.exit_on_failure? = true
 
+      # Ctrl-C is the only way out of a cli-ui selection and it raises
+      # Interrupt, which Thor does not handle -- taking the documented exit
+      # would otherwise print a backtrace through thor/dispatch.
+      def self.start(given_args = ARGV, config = {})
+        super
+      rescue Interrupt
+        warn Ui.yellow("cancelled")
+        raise SystemExit, 130
+      end
+
       def initialize(*args)
         super
         @prompt = Ui::Prompt.new

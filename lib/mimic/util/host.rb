@@ -1,4 +1,5 @@
 require "etc"
+require "open3"
 require "pathname"
 require_relative "probes"
 require_relative "../engine_cli/registry"
@@ -42,6 +43,34 @@ module Mimic
         end
 
         def llama_server = EngineCli::Registry.installed_binary
+
+        def gpu_total_mib
+          out, status = Open3.capture2("nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits")
+          return nil unless status.success?
+
+          Integer(out.lines.first.to_s.strip)
+        rescue Errno::ENOENT, ArgumentError, TypeError
+          nil
+        end
+
+        # VRAM held by the given processes. The engine that owns the CUDA
+        # context is not always the process we spawned -- llama.cpp's router
+        # loads each model in a child -- so the caller passes the whole
+        # descendant set and every match counts.
+        def gpu_process_mib(pids)
+          out, status = Open3.capture2("nvidia-smi", "--query-compute-apps=pid,used_memory",
+                                       "--format=csv,noheader,nounits")
+          return nil unless status.success?
+
+          wanted = pids.map(&:to_i)
+          total = out.lines.filter_map do |line|
+            pid, mib = line.split(",").map { |field| field.strip.to_i }
+            mib if wanted.include?(pid)
+          end.sum
+          total.positive? ? total : nil
+        rescue Errno::ENOENT, ArgumentError, TypeError
+          nil
+        end
 
         private
 

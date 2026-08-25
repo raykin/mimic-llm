@@ -19,28 +19,27 @@ RSpec.describe Mimic::Engine::IkLlama do
     stub_const("Mimic::LlmConfig::MODEL_MMPROJ_PATH", @dir / "model-mmproj.json")
     stub_const("Mimic::LlmConfig::MODEL_COMPUTE_PATH", @dir / "model-compute.json")
     stub_const("Mimic::LlmConfig::MODEL_SAMPLING_PATH", @dir / "model-sampling.json")
-    stub_const("Mimic::Model::N_CPU_MOE_PATH", @dir / "ik-n-cpu-moe.json")
+    stub_const("Mimic::Model::Memory::N_CPU_MOE_PATH", @dir / "ik-n-cpu-moe.json")
   end
 
-  describe ".log_tail" do
-    it "returns an empty string when the log cannot be read" do
-      log_path = @dir / "unreadable.log"
-      log_path.write("boom")
-      log_path.chmod(0o000)
-      allow(Mimic::Engine::Base).to receive(:log_file).and_return(log_path)
-      expect(described_class.log_tail).to eq("")
-    end
+  def server_process(log_path)
+    process = Mimic::Engine::ServerProcess.new(pid_file: @dir / "server.pid", log_file: log_path,
+                                               proc_scan_fallback: true)
+    allow(Mimic::Engine::ServerProcess).to receive(:chat).and_return(process)
+    process
+  end
 
-    it "scrubs invalid bytes so the retry decision can still be made" do
+  describe ".retry_blocker" do
+    # The retry decision is made against a log that may carry invalid bytes,
+    # so it has to survive a scrubbed tail rather than raising on one.
+    it "reads a scrubbed tail without raising" do
       log_path = @dir / "server.log"
       log_path.binwrite("\xFF\xFE junk\nllm_load_print_meta: n_expert     = 0\ncudaMalloc failed\n")
-      allow(Mimic::Engine::Base).to receive(:log_file).and_return(log_path)
 
-      tail = described_class.log_tail
+      tail = server_process(log_path).log_tail
       expect(tail).to be_valid_encoding
       expect(described_class.retry_blocker(tail, 0))
         .to eq("this model is dense, so it has no experts to offload")
-      expect { tail.strip.lines.last(4).join }.not_to raise_error
     end
   end
 
@@ -182,13 +181,13 @@ RSpec.describe Mimic::Engine::IkLlama do
     it "raises the cached n_cpu_moe when the preflight says the context will not fit" do
       settings = settings_for
       stub_llama(settings, running: false, spawns: 4242)
-      Mimic::Model.new("/m.gguf").remember_n_cpu_moe(0)
-      allow_any_instance_of(Mimic::Model).to receive(:preflight).and_return(
-        { fits: false, need_mib: 23_100, budget_mib: 22_528 },
+      Mimic::Model.new("/m.gguf").memory.remember_n_cpu_moe(0)
+      allow_any_instance_of(Mimic::Model).to receive(:footprint).and_return(
+        instance_double(Mimic::Model::Footprint, measurable?: true, fits?: false, layers_to_offload: 6,
+                        measured_overhead_mib: nil),
       )
-      allow(Mimic::Model::Vram).to receive(:layers_to_offload).and_return(6)
       allow(Mimic::Util::Probes).to receive(:wait_ready).and_return(true)
-      allow(Mimic::Model::Schema).to receive(:block_count).and_return(40)
+      allow_any_instance_of(Mimic::Model::Header).to receive(:block_count).and_return(40)
 
       expect { described_class.new(settings).start }.to output(/offloading MoE experts of first 6 layers/).to_stdout
 
@@ -198,24 +197,26 @@ RSpec.describe Mimic::Engine::IkLlama do
     it "records what the loaded instance cost beyond the estimate" do
       settings = settings_for
       stub_llama(settings, running: false, spawns: 4242)
-      allow(Mimic::Model::Vram).to receive(:preflight).and_return({ fits: true, need_mib: 100, budget_mib: 22_528 })
       allow(Mimic::Util::Probes).to receive(:wait_ready).and_return(true)
       allow(Mimic::Util::Probes).to receive(:descendants).with(4242).and_return([])
       settings.model.context_length = 65_536
       settings.llama.cache_type = "q8_0"
-      allow(Mimic::Model::Vram).to receive(:measured_overhead_mib)
-        .with("/m.gguf", 65_536, "q8_0", pids: [4242]).and_return(1712)
+      measured = instance_double(Mimic::Model::Footprint, measurable?: true, fits?: true)
+      allow(measured).to receive(:measured_overhead_mib).with(pids: [4242]).and_return(1712)
+      allow_any_instance_of(Mimic::Model).to receive(:footprint).and_return(measured)
 
       described_class.new(settings).start
 
-      expect(Mimic::Model.new("/m.gguf").compute_mib(65_536, "q8_0")).to eq(1712)
+      expect(Mimic::Model.new("/m.gguf").memory.compute_mib(65_536, "q8_0")).to eq(1712)
     end
 
     it "leaves the cached n_cpu_moe alone when the preflight fits" do
       settings = settings_for
       stub_llama(settings, running: false, spawns: 4242)
-      Mimic::Model.new("/m.gguf").remember_n_cpu_moe(3)
-      allow(Mimic::Model::Vram).to receive(:preflight).and_return({ fits: true, need_mib: 100, budget_mib: 22_528 })
+      Mimic::Model.new("/m.gguf").memory.remember_n_cpu_moe(3)
+      allow_any_instance_of(Mimic::Model).to receive(:footprint).and_return(
+        instance_double(Mimic::Model::Footprint, measurable?: true, fits?: true, measured_overhead_mib: nil),
+      )
       allow(Mimic::Util::Probes).to receive(:wait_ready).and_return(true)
 
       described_class.new(settings).start
@@ -255,7 +256,7 @@ RSpec.describe Mimic::Engine::IkLlama do
     it "prints the MoE offload and MTP notices on stdout, not stderr" do
       settings = settings_for(mtp: "on")
       stub_llama(settings, running: false, spawns: 4242)
-      Mimic::Model.new("/m.gguf").remember_n_cpu_moe(8)
+      Mimic::Model.new("/m.gguf").memory.remember_n_cpu_moe(8)
       allow(Mimic::Util::Probes).to receive(:wait_ready).and_return(true)
 
       expect { described_class.new(settings).start(remember: false) }
@@ -268,27 +269,25 @@ RSpec.describe Mimic::Engine::IkLlama do
     it "retries with more layers offloaded after a recoverable OOM" do
       settings = settings_for
       stub_llama(settings, running: false, spawns: 99)
-      allow(Mimic::Engine::Llama).to receive(:cleanup_failed)
-      allow(described_class).to receive(:log_tail).and_return(
-        "cudaMalloc failed: out of memory\nllm_load_print_meta: n_expert        = 8\n" \
-        "llm_load_print_meta: n_layer         = 48\n",
-      )
+      log = @dir / "retry.log"
+      log.write("cudaMalloc failed: out of memory\nllm_load_print_meta: n_expert        = 8\n" \
+                "llm_load_print_meta: n_layer         = 48\n")
+      allow(server_process(log)).to receive(:cleanup_failed)
       allow(Mimic::Util::Probes).to receive(:wait_ready).and_return(false, true)
 
       result = nil
       expect { result = described_class.new(settings).start(remember: false) }
         .to output(/offloading MoE experts of first #{described_class::CPU_MOE_STEP} layers/).to_stdout
       expect(result.ok?).to be true
-      expect(Mimic::Model.new("/m.gguf").n_cpu_moe).to eq(described_class::CPU_MOE_STEP)
+      expect(Mimic::Model.new("/m.gguf").memory.n_cpu_moe).to eq(described_class::CPU_MOE_STEP)
     end
 
     it "stops retrying and reports the blocker when the model is dense" do
       settings = settings_for
       stub_llama(settings, running: false, spawns: 99)
-      allow(Mimic::Engine::Llama).to receive(:cleanup_failed)
-      allow(described_class).to receive(:log_tail).and_return(
-        "cudaMalloc failed: out of memory\nllm_load_print_meta: n_expert        = 0\n",
-      )
+      log = @dir / "dense.log"
+      log.write("cudaMalloc failed: out of memory\nllm_load_print_meta: n_expert        = 0\n")
+      allow(server_process(log)).to receive(:cleanup_failed)
       allow(Mimic::Util::Probes).to receive(:wait_ready).and_return(false)
 
       result = described_class.new(settings).start(remember: false)

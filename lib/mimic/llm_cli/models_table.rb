@@ -4,7 +4,9 @@ require_relative "../util/fmt"
 require_relative "../llm_config"
 require_relative "../model"
 require_relative "../paths"
-require_relative "../model/vram"
+require_relative "../model/footprint"
+require_relative "../model/upstream"
+require_relative "../util/hf"
 
 module Mimic
   # The `llm models` board: every GGUF under the configured search paths,
@@ -15,28 +17,32 @@ module Mimic
       ALIAS_WIDTH = 44
       PATH_WIDTH = 20
 
-      def initialize(config, scan)
+      def initialize(config, scan, client: nil)
         @config = config
         @scan = scan
+        @client = client
       end
 
       def render
         rows = @scan.map { |model| row(model) }
         return no_models if rows.empty?
 
-        Ui.table(header: HEADER, rows: rows)
+        Ui.table(header: header, rows: rows)
+        print_upstream_legend if @client
         puts "\nSwitch with `llm setup` -- active model is marked ●"
         print_search_paths
       end
 
       private
 
+      def header = @client ? HEADER + ["Upstream"] : HEADER
+
       def row(model)
         path = model.path
         real = model.real
         base_alias = model.model_alias
         remembered = Model.new(real)
-        [
+        cells = [
           real == active_real ? Ui.green("●") : "",
           truncate(base_alias, ALIAS_WIDTH),
           path.basename(".*").to_s.delete_prefix(base_alias).sub(/\A-/, ""),
@@ -44,11 +50,28 @@ module Mimic
           moe_mark(real),
           model.vision? ? Ui.green("✓") : "",
           model.embedding? ? Ui.green("✓") : "",
-          remembered.n_cpu_moe&.to_s || "",
+          remembered.memory.n_cpu_moe&.to_s || "",
           template_for(base_alias).file? ? "✓" : "",
           last_ctx(remembered),
           parent_label(path),
         ]
+        @client ? cells + [upstream_mark(model)] : cells
+      end
+
+      def print_upstream_legend
+        puts "\nUpstream compares file size against the repo the GGUF was published from."
+        puts "  #{Ui.gray('?')}  no source repo -- the header names none and the path is not LM Studio's, or huggingface.co was unreachable"
+        puts "  #{Ui.yellow('gone')}  the repo no longer publishes a file by that name"
+      end
+
+      def upstream_mark(model)
+        upstream = Model::Upstream.new(model, client: @client)
+        case upstream.verdict
+        when :current then Ui.green("current")
+        when :stale then Ui.red(["stale", upstream.updated_at].compact.join(" "))
+        when :gone then Ui.yellow("gone")
+        else Ui.gray("?")
+        end
       end
 
       def active_real
@@ -68,7 +91,7 @@ module Mimic
       def template_for(base_alias) = Mimic::Paths::CHAT_TEMPLATES_DIR / "#{base_alias}.jinja"
 
       def last_ctx(model)
-        recalled = model.last_ctx&.first
+        recalled = model.memory.last_ctx&.first
         recalled.nil? ? "" : Util::Fmt.commas(recalled)
       end
 

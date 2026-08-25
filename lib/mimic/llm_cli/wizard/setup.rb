@@ -6,7 +6,8 @@ require_relative "../../util/host"
 require_relative "../../util/probes"
 require_relative "../../engine_cli"
 require_relative "../../engine"
-require_relative "../../model/vram"
+require_relative "context_preflight"
+require_relative "../../model/library"
 require_relative "../../llm_config"
 require_relative "../../model"
 
@@ -32,11 +33,6 @@ module Mimic
           "llama.cpp" => "upstream, router-mode preset",
           "ik_llama.cpp" => "ikawrakow fork (IQK quants, fused MoE)",
           "prism-llama.cpp" => "PrismML fork (Q2_0 ternary Bonsai kernels)",
-        }.freeze
-
-        ENGINE_TERNARY_PACKING = {
-          "llama.cpp" => :g64,
-          "prism-llama.cpp" => :g128,
         }.freeze
 
         attr_reader :config
@@ -102,14 +98,15 @@ module Mimic
 
         def choose_context
           step("Context preset")
-          remembered = @config.model.file.last_ctx
+          remembered = @config.model.file.memory.last_ctx
           if remembered
             @config.model.context_length, @config.llama.cache_type = remembered
             puts "#{Ui.green('Last good run for this model:')} #{Util::Fmt.commas(remembered[0])} / #{remembered[1]}"
           end
+          preflight = ContextPreflight.new(@config, prompt: @prompt)
           loop do
             pick_context
-            break if preflight_ok?
+            break if preflight.ok?
           end
           @config
         end
@@ -121,46 +118,8 @@ module Mimic
           @config
         end
 
-        def search_dirs
-          @config.search_paths
-        end
-
-        def scan_gguf
-          found = []
-          seen = {}
-          search_dirs.each do |directory|
-            next unless directory.directory?
-
-            Dir.glob(directory / "**/*.gguf").sort.each do |raw|
-              path = Pathname.new(raw)
-
-              # A dangling symlink still shows up in the glob; realpath is what
-              # proves the model is actually there.
-              real = begin
-                path.realpath
-              rescue SystemCallError
-                next
-              end
-              next if seen[real]
-
-              seen[real] = true
-              found << [path, directory]
-            end
-          end
-          Model.pair(found)
-        end
-
-        # An embedding model answers /v1/embeddings and nothing else -- it has no
-        # chat template and no completions endpoint, so it belongs to `llm embed`
-        # rather than to the picker that chooses what the agents talk to.
-        def chat_models
-          loadable, @hidden_models = scan_gguf.reject(&:embedding?).partition { |model| loadable?(model) }
-          loadable
-        end
-        def embedding_models = scan_gguf.select(&:embedding?)
-
         def select_model(current)
-          by_label = chat_models.to_h { |model| [model_label(model), model.path.to_s] }
+          by_label = library.chat.to_h { |model| [model_label(model), model.path.to_s] }
           manual = "Enter a path manually..."
           answer = if by_label.any?
                      current_label = by_label.key(current)
@@ -185,25 +144,14 @@ module Mimic
 
         private
 
-        # A ternary GGUF is written for exactly one engine's block layout, and
-        # the wrong one either refuses it or reads garbage -- so the picker only
-        # offers the packing the chosen engine can read. ik_llama.cpp defines no
-        # Q2_0 at all, hence no entry.
-        #
-        # prism-llama.cpp exists only to serve its own G128 ternary kernels --
-        # any ordinary GGUF it could also load belongs to llama.cpp/ik_llama.cpp
-        # instead, so its list narrows to G128-only rather than G128-plus-plain.
-        def loadable?(model)
-          packing = Model::Header.new(model.real).ternary_packing
-          return packing == ENGINE_TERNARY_PACKING[@config.llama.engine] if @config.llama.engine == "prism-llama.cpp"
-
-          packing.nil? || packing == ENGINE_TERNARY_PACKING[@config.llama.engine]
+        def library
+          @library ||= Model::Library.new(@config)
         end
 
         def report_hidden_models
-          return if @hidden_models.nil? || @hidden_models.empty?
+          return if library.hidden.empty?
 
-          names = @hidden_models.map { |model| model.path.basename.to_s }.join(", ")
+          names = library.hidden.map { |model| model.path.basename.to_s }.join(", ")
           reason = if @config.llama.engine == "prism-llama.cpp"
                      "not a Prism G128 ternary model"
                    else
@@ -234,54 +182,6 @@ module Mimic
             @config.model.context_length = ctx
             @config.llama.cache_type = kv
           end
-        end
-
-        # Estimate VRAM for the chosen ctx; warn + confirm if it would over-commit.
-        #
-        # Returns true to accept (fits, un-checkable, or user override), false to re-pick.
-        def preflight_ok?
-          model = @config.model.file
-          est = model.preflight(@config.model.context_length, @config.llama.cache_type,
-                                compute_mib: model.compute_mib(@config.model.context_length, @config.llama.cache_type))
-          return true if est.nil?
-
-          if est[:fits]
-            puts "#{Ui.green('VRAM ok')} -- needs ~#{format('%.1f', est[:need_mib] / 1024.0)} GB of " \
-                 "#{format('%.1f', est[:total_mib] / 1024.0)} GB (fits to ~#{Util::Fmt.commas(est[:max_ctx])} tok)"
-            return true
-          end
-          return true if offloaded_to_fit?(est)
-
-          puts "#{Ui.yellow('this context won\'t fully fit VRAM.')} Needs " \
-               "~#{format('%.1f', est[:need_mib] / 1024.0)} GB (weights #{format('%.1f', est[:weights_mib] / 1024.0)} + " \
-               "KV #{format('%.1f', est[:kv_mib] / 1024.0)} + compute), budget ~#{format('%.1f', est[:budget_mib] / 1024.0)} GB.\n" \
-               "  It will load but crash at runtime once context passes " \
-               "~#{Util::Fmt.commas(est[:max_ctx])} tokens. Pick <= that, or switch KV to q4_0."
-          @prompt.yes?("Use this over-committed context anyway?", default: false)
-        end
-
-        # A MoE model can trade VRAM for PCIe traffic by keeping some layers'
-        # experts on the CPU, so a deficit the ceiling can cover is a setting to
-        # write, not a warning to print. Only ik takes --n-cpu-moe; llama.cpp's
-        # preset pins n-gpu-layers=999 on purpose.
-        def offloaded_to_fit?(est)
-          return false unless @config.llama.ik?
-
-          layers = Model::Vram.layers_to_offload(@config.model.path,
-                                                  deficit_mib: est[:need_mib] - est[:budget_mib],
-                                                  ceiling: offload_ceiling)
-          return false if layers.nil? || layers.zero?
-
-          @config.model.file.remember_n_cpu_moe(layers)
-          puts "#{Ui.green("offloading #{layers} layers of MoE experts to CPU")} -- " \
-               "frees ~#{format('%.1f', (est[:need_mib] - est[:budget_mib]) / 1024.0)} GB, " \
-               "so #{Util::Fmt.commas(@config.model.context_length)} tokens fits"
-          true
-        end
-
-        def offload_ceiling
-          layers = Model::Header.new(@config.model.path).block_count
-          [Engine::IkLlama::CPU_MOE_MAX, layers || Engine::IkLlama::CPU_MOE_MAX].min
         end
       end
     end

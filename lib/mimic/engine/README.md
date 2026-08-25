@@ -9,7 +9,8 @@ launch preset.
 
 | Constant                 | Role                                                                                                           |
 | ------------------------ | -------------------------------------------------------------------------------------------------------------- |
-| `Engine::Base`           | abstract; one server process, one log, one pid file, and the model-side prep every engine does before spawning |
+| `Engine::Base`           | abstract; the model-side prep every engine does before spawning                                                |
+| `Engine::ServerProcess`  | one running llama-server: pid file, log, stop and cleanup — `.chat` and `.embed` name the two                   |
 | `Engine::Llama`          | mainline llama.cpp, router mode (`--models-preset`)                                                            |
 | `Engine::IkLlama`        | ik_llama.cpp, direct argv + the CPU-MoE retry loop                                                             |
 | `Engine::LlamaEmbed`     | the embedding/rerank server — a second llama.cpp on a second port, picked by role not by config                |
@@ -24,7 +25,9 @@ Two collaborators live under `engine/` without being engines: `Launcher`, which
 spawns the process, and `ChatTemplate`, which prepares the model's Jinja
 template before the spawn and probes the live server after it. Nothing outside
 `Base` uses either, which is why they stay here rather than in a namespace of
-their own.
+their own. `ServerProcess` is a third, but unlike those two it is reached from
+outside — `llm stop` and `llm status` ask about the process without building an
+engine.
 
 The dependency runs both ways and that is deliberate: `Engine::Base` asks
 `EngineCli::Registry` where its binary is, and `Registry.for` hands back an
@@ -53,12 +56,19 @@ a chat engine.
 
 ## Per-server log and pid file
 
-`Base.log_file` / `Base.pid_file` are singleton methods, not constants, because
-a constant resolves lexically: an inherited `log_tail` would read the chat
-server's log whichever subclass called it. `LlamaEmbed` overrides both, and
-overrides `proc_scan_fallback?` to `false` — the `/proc` scan that finds a chat
-server whose pid file went missing would match the embedding server too, since
-they are the same binary.
+`Engine::ServerProcess` is one running llama-server: its pid file, its log, and
+how it is found and killed. It knows nothing about models, flags or engines.
+`ServerProcess.chat` and `ServerProcess.embed` name the two that exist;
+`Base#process` returns the first, `LlamaEmbed#process` the second.
+
+`embed` sets `proc_scan_fallback?` to `false` — the `/proc` scan that rescues a
+chat server whose pid file went missing would match the embedding server too,
+since they are the same binary. `llm stop` excludes `ServerProcess.embed.pids`
+for the same reason.
+
+It is `ServerProcess`, not `Process`: a class named `Process` inside `Engine`
+shadows core `Process` for every file in the namespace, and `Launcher`'s
+`Process.spawn` resolves to it.
 
 ## Why prism-llama.cpp has no class
 
@@ -100,12 +110,12 @@ rather than by where they were first written:
 
 - `Engine::Status` → `EngineCli::Status`. Its only consumer is `llm status`, and
   rendering a board is something you do _to_ an engine from the CLI.
-- `Engine::Schema` → `Model::Schema`. It is a GGUF binary reader; 9 of its 11
-  call sites are `Mimic::Model` and `Model::Header`.
-- `Engine::Vram` → `Model::Vram`. GGUF math plus `nvidia-smi`, consumed mostly
-  by `Model#preflight` and the setup wizard. `gpu_total_mib` is the one method
-  that is a machine fact rather than a model fact — if more of those arrive,
-  they want their own home, not this one.
+- `Engine::Schema` → `Model::Schema`, since split into `Model::Gguf` (the binary
+  reader) and `Model::Header` (the predicates over one parsed header).
+- `Engine::Vram` → `Model::Vram`, since split into `Model::Footprint` (weights +
+  KV + compute against the budget, built by `Model#footprint`) and the two
+  `nvidia-smi` readers, which were machine facts rather than model facts and
+  went to `Util::Host`.
 
 `Engine::Embed` became `Engine::LlamaEmbed < Base` in the same pass. It arrived
 here depending on `Base` the awkward way — reaching in for `LOG_TAIL_BYTES`,
@@ -115,3 +125,16 @@ singleton methods removed the reason those copies existed. It still overrides
 `find_binary` (llama.cpp's own build only), `running?`/`models_url` (its own
 port, `/health` for readiness) and `start` (no `remember:` to honour, so the
 abstract signature on `Base` loosened to `start(**)`).
+
+## Where things moved (2026-08-18)
+
+`Base`'s class side became `Engine::ServerProcess`. `log_file`, `pid_file`,
+`proc_scan_fallback?`, `log_tail`, `last_lines`, `stop` and `cleanup_failed`
+were singleton methods on an abstract class, which made them one-per-subclass
+by construction: `LlamaEmbed` existed partly to override three of them, and
+`llm stop` reached the chat server by naming `Engine::Base` directly. They are
+now instance state on an object with two named constructors.
+
+`Base.supports_mtp?` went the other way, to `Model::Header#supports_mtp?` — it
+reads GGUF bytes, which is model knowledge, not process knowledge. `Model`
+delegates so callers holding a `Model` need not reach through to its header.

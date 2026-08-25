@@ -13,7 +13,7 @@ port's file-copy procedure. It does not apply.
 
 No mimic code reads `../unsloth/` at runtime; it is a reference checkout, not a
 dependency. `unsloth_api` / `UNSLOTH_STUDIO_AUTH_TOKEN` are frozen by the live
-`~/.mimic/unsloth-agents/codex/config.toml` that `Agent::Codex.write_config` merges
+`~/.mimic/agents/codex/config.toml` that `Agent::Codex.write_config` merges
 into, **not** by upstream -- upstream renaming them is a non-event. The pass is
 purely opportunistic: new flags, env vars, or config keys that make Claude Code or
 Codex behave better against llama-server.
@@ -42,6 +42,27 @@ Ignore, and say you ignored it rather than summarising it:
 
 Newest first. Each entry records the HEAD reviewed **up to**, which is where the
 next pass starts.
+
+### 2026-08-19 -- up to `cabed07f9`, nothing to port
+
+Two commits touched `start.py` since `3bbed688a`:
+
+- `1b48147d8` -- Windows: resolve the launcher through `sys.executable` instead of
+  `shutil.which("unsloth")` in `_start_studio_server`, because PATHEXT picks the
+  denied `unsloth.exe` over the `.cmd` shim (upstream issue #8490). Windows-only,
+  and the call it fixes spawns `unsloth run` -- the Studio server. mimic points
+  agents straight at llama-server and never spawns that.
+- `7116d5e6c` -- comment only, +8 lines and no code, explaining why
+  `_hermes_resume_oneshot_args` re-adds `--yolo` / `--accept-hooks` to a resumed
+  one-shot. Upstream's Hermes wrapper, not `Agent::Hermes`, and nothing to port
+  from a comment.
+
+No new flags, env vars, config keys, version gates, or `_claude_settings_overlay`
+change. Claude and Codex recipes untouched.
+
+Note on the fetch: `git pull --ff-only` reported "unable to update local ref" for
+two unrelated `studio/*` remote branches, so that fetch was partial. `main` is
+level with `origin/main` at `cabed07f9`, which is what this pass reads.
 
 ### 2026-08-11 -- up to `3bbed688a`, nothing to port
 

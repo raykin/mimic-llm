@@ -51,7 +51,7 @@ module Mimic
       end
 
       def ask(question, default: nil, convert: nil)
-        answer = CLI::UI::Prompt.ask(question, default: default&.to_s, allow_empty: false)
+        answer = CLI::UI::Prompt.ask(question, default: default&.to_s, allow_empty: !default.nil?)
         convert == :int ? Integer(answer) : answer
       end
 

@@ -16,8 +16,10 @@ RSpec.describe Mimic::LlmCli::Wizard::Moe do
         dense = root / "dense.gguf"
         FileUtils.touch(moe)
         FileUtils.touch(dense)
-        allow(Mimic::Model::Schema).to receive(:moe?) { |path| path == moe.realpath.to_s }
-        stub_const("Mimic::Model::N_CPU_MOE_PATH", root / "ik-n-cpu-moe.json")
+        allow(Mimic::Model::Header).to receive(:new).and_wrap_original do |original, path|
+          original.call(path).tap { |header| allow(header).to receive(:moe?).and_return(path.to_s == moe.realpath.to_s) }
+        end
+        stub_const("Mimic::Model::Memory::N_CPU_MOE_PATH", root / "ik-n-cpu-moe.json")
         prompt = instance_double(Mimic::Ui::Prompt)
         allow(prompt).to receive(:select).and_return(moe.realpath.to_s, :cancel)
 
@@ -28,8 +30,8 @@ RSpec.describe Mimic::LlmCli::Wizard::Moe do
     end
 
     it "rejects a value above the model's layer ceiling" do
-      allow(Mimic::Model::Schema).to receive_messages(moe?: true, block_count: 10)
-      stub_const("Mimic::Model::N_CPU_MOE_PATH", Pathname.new("/nonexistent-for-spec/ik-n-cpu-moe.json"))
+      allow_any_instance_of(Mimic::Model::Header).to receive_messages(moe?: true, block_count: 10)
+      stub_const("Mimic::Model::Memory::N_CPU_MOE_PATH", Pathname.new("/nonexistent-for-spec/ik-n-cpu-moe.json"))
       prompt = instance_double(Mimic::Ui::Prompt, ask: 99)
       allow(prompt).to receive(:select).and_return("/m.gguf", :set)
 
@@ -39,8 +41,8 @@ RSpec.describe Mimic::LlmCli::Wizard::Moe do
     it "caches a value within range" do
       Dir.mktmpdir do |dir|
         cache_file = Pathname.new(dir) / "ik-n-cpu-moe.json"
-        stub_const("Mimic::Model::N_CPU_MOE_PATH", cache_file)
-        allow(Mimic::Model::Schema).to receive_messages(moe?: true, block_count: 10)
+        stub_const("Mimic::Model::Memory::N_CPU_MOE_PATH", cache_file)
+        allow_any_instance_of(Mimic::Model::Header).to receive_messages(moe?: true, block_count: 10)
 
         prompt = instance_double(Mimic::Ui::Prompt, ask: 4)
         allow(prompt).to receive(:select).and_return("/m.gguf", :set)

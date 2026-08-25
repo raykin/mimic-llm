@@ -26,31 +26,16 @@ RSpec.describe Mimic::Engine::LlamaEmbed do
     expect(picked).not_to include(described_class)
   end
 
-  describe ".log_file / .pid_file" do
-    it "keeps its own pair rather than the chat server's" do
-      expect(described_class.log_file).not_to eq(Mimic::Engine::Base.log_file)
-      expect(described_class.pid_file).not_to eq(Mimic::Engine::Base.pid_file)
-    end
-
-    it "tails its own log through the inherited reader" do
-      Dir.mktmpdir do |dir|
-        log_path = Pathname.new(dir) / "llama-embed.log"
-        log_path.write("prelude\nembedding server ready\n")
-        allow(described_class).to receive(:log_file).and_return(log_path)
-
-        expect(described_class.log_tail("prelude\n".bytesize)).to eq("embedding server ready\n")
-      end
-    end
-  end
-
-  describe ".stop" do
+  describe "#process" do
     # A /proc scan for "llama-server" would match the chat server, which is
-    # the same binary on a different port.
-    it "never falls back to a /proc scan" do
-      expect(Mimic::Util::Probes).to receive(:stop_pid)
-        .with(described_class.pid_file, "llama-server", exclude: [], fallback: false)
+    # the same binary on a different port -- so the embedding server takes
+    # the process object that refuses that fallback.
+    it "is the embedding server's process, not the chat server's" do
+      instance = described_class.new(settings)
 
-      described_class.stop
+      expect(instance.process.pid_file).to eq(Mimic::Engine::ServerProcess.embed.pid_file)
+      expect(instance.process.log_file).to eq(Mimic::Engine::ServerProcess.embed.log_file)
+      expect(instance.process.proc_scan_fallback?).to be false
     end
   end
 

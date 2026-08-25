@@ -1,5 +1,5 @@
 require "pathname"
-require_relative "../model/schema"
+require_relative "../model/header"
 require_relative "../llm_config"
 require_relative "../model"
 require_relative "../paths"
@@ -26,27 +26,14 @@ module Mimic
       RERANK_NAME = /rerank/i
 
       class << self
-        def log_file = Paths::LLM_RUN_DIR / "llama-embed.log"
-        def pid_file = Paths::PID_DIR / "llama-embed.pid"
-
-        # This server is one process with no children, so a scan for
-        # "llama-server" could only ever find the chat server.
-        def proc_scan_fallback? = false
-
         # Which endpoint a model wants, read from the GGUF. A reranker is an
         # embedding model whose pooling is RANK, but the bge rerankers ship
         # no pooling_type key at all -- for those the name is what is left.
         def mode_for(path)
-          return "rerank" if Model::Header.new(path).pooling_type == Model::Schema::POOLING_RANK
+          return "rerank" if Model::Header.new(path).pooling_type == Model::Header::POOLING_RANK
           return "rerank" if RERANK_NAME.match?(File.basename(path.to_s))
 
           "embeddings"
-        end
-
-        # The live embedding pids, for the chat side to leave alone.
-        def pids
-          pid = Util::Probes.read_pid(pid_file, "llama-server")
-          pid ? [pid, *Util::Probes.descendants(pid)] : []
         end
       end
 
@@ -54,6 +41,8 @@ module Mimic
         super
         @embed = settings.embed
       end
+
+      def process = @process ||= Engine::ServerProcess.embed
 
       def health_url = "#{@embed.base_url}/health"
       def models_url = "#{@embed.base_url}/v1/models"
@@ -104,16 +93,15 @@ module Mimic
       private
 
       def launch(binary)
-        log_file = self.class.log_file
-        log_offset = log_file.exist? ? log_file.size : 0
+        log_offset = process.log_size
         pid = launcher.spawn(command(binary))
         if Util::Probes.wait_ready(health_url, alive: -> { Util::Probes.child_alive?(pid) }, label: "waiting for embedding server")
           return Result.ok("embedding server ready on #{@embed.base_url} (#{mode}, pid #{pid})")
         end
 
-        self.class.cleanup_failed(pid)
-        Result.error("embedding server failed to start -- see #{log_file}\n" \
-                     "#{self.class.last_lines(self.class.log_tail(log_offset))}")
+        process.cleanup_failed(pid)
+        Result.error("embedding server failed to start -- see #{process.log_file}\n" \
+                     "#{process.last_lines(process.log_tail(log_offset))}")
       end
     end
   end

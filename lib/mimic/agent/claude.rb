@@ -16,12 +16,9 @@ module Mimic
       # WebSearch/WebFetch are Anthropic server-executed tools -- llama.cpp's
       # /v1/messages bridge has no implementation (server log: "unsupported
       # Responses tool type 'web_search'"), so they silently no-op instead of
-      # failing. Deny them and give c4ai MCP the internet-access job instead.
+      # failing. Denied so the failure is visible; an MCP server named in
+      # Paths::MCP_SERVERS_PATH can take the internet-access job over.
       DENIED_TOOLS = %w[WebSearch WebFetch].freeze
-      C4AI_MCP_SERVER = {
-        "command" => "python",
-        "args" => ["-m", "c4ai_mcp.fastmcp_server"],
-      }.freeze
 
       # SHIM_DIR holds a `claude` that execs this result -- resolving to it
       # would loop.
@@ -42,15 +39,26 @@ module Mimic
         config_dir
       end
 
-      # Seeds/refreshes the c4ai MCP entry in the isolated .claude.json --
-      # merged, not overwritten, since CC writes its own runtime state
-      # (onboarding, tips, startup counts) into this same file.
-      def self.merge_mcp_config(seed)
-        data = seed.exist? ? JSON.parse(seed.read) : {}
-        return if data["mcpServers"].is_a?(Hash) && data["mcpServers"]["c4ai"] == C4AI_MCP_SERVER
+      # Whatever the user opted into, or nothing.
+      def self.mcp_servers
+        JSON.parse(Paths::MCP_SERVERS_PATH.read)
+      rescue SystemCallError, JSON::ParserError
+        {}
+      end
 
-        data["mcpServers"] ||= {}
-        data["mcpServers"]["c4ai"] = C4AI_MCP_SERVER
+      # Seeds/refreshes those entries in the isolated .claude.json -- merged,
+      # not overwritten, since CC writes its own runtime state (onboarding,
+      # tips, startup counts) into this same file and the user may have added
+      # servers of their own.
+      def self.merge_mcp_config(seed)
+        wanted = mcp_servers
+        return if wanted.empty?
+
+        data = seed.exist? ? JSON.parse(seed.read) : {}
+        current = data["mcpServers"].is_a?(Hash) ? data["mcpServers"] : {}
+        return if wanted.all? { |name, spec| current[name] == spec }
+
+        data["mcpServers"] = current.merge(wanted)
         seed.write("#{JSON.generate(data)}\n")
       rescue JSON::ParserError
         nil

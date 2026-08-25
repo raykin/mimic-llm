@@ -12,39 +12,6 @@ RSpec.describe Mimic::Engine::Llama do
   end
   let(:settings) { Mimic::LlmConfig::Settings.new(cfg) }
 
-  describe ".log_tail" do
-    it "reads from an offset and scrubs invalid bytes" do
-      Dir.mktmpdir do |dir|
-        log_path = Pathname.new(dir) / "server.log"
-        log_path.binwrite("prelude\n\xFF\xFE junk\nline one\nline two\n")
-        allow(Mimic::Engine::Base).to receive(:log_file).and_return(log_path)
-
-        tail = described_class.log_tail("prelude\n".bytesize)
-        expect(tail).to be_valid_encoding
-        expect(tail).to include("line two")
-        expect(tail).not_to include("prelude")
-      end
-    end
-
-    it "returns an empty string when the log cannot be read" do
-      allow(Mimic::Engine::Base).to receive(:log_file).and_return(Pathname.new("/nope/missing.log"))
-      expect(described_class.log_tail).to eq("")
-    end
-  end
-
-  describe ".last_lines" do
-    it "joins the last n lines only" do
-      text = "a\nb\nc\nd\ne\n"
-      expect(described_class.last_lines(text, 2)).to eq("d\ne")
-    end
-  end
-
-  describe "#models_url" do
-    it "targets the OpenAI-compatible /v1/models path" do
-      expect(described_class.new(settings).models_url).to eq("http://127.0.0.1:8080/v1/models")
-    end
-  end
-
   describe "#render_preset" do
     it "sanitizes a template that would throw and points the preset at the copy" do
       Dir.mktmpdir do |dir|
@@ -66,27 +33,6 @@ RSpec.describe Mimic::Engine::Llama do
         expect(generated.read).not_to include("raise_exception")
         expect((root / "llama-models.ini").read).to include("chat-template-file = #{generated}")
       end
-    end
-  end
-
-  describe ".supports_mtp?" do
-    # Python caught OSError, so an unreadable or directory-shaped model path
-    # falls back to "no MTP" instead of raising out of render_preset.
-    it "returns false for a directory instead of raising" do
-      expect(described_class.supports_mtp?(Dir.tmpdir)).to be false
-    end
-
-    it "returns false for an unreadable file instead of raising" do
-      Dir.mktmpdir do |dir|
-        path = Pathname.new(dir) / "model.gguf"
-        path.write("nextn_predict_layers")
-        path.chmod(0o000)
-        expect(described_class.supports_mtp?(path.to_s)).to be false
-      end
-    end
-
-    it "returns false for a missing path" do
-      expect(described_class.supports_mtp?("/nope/missing.gguf")).to be false
     end
   end
 
@@ -206,18 +152,20 @@ RSpec.describe Mimic::Engine::Llama do
       start_env
       log_path = @dir / "server.log"
       log_path.write("a previous run\n")
-      allow(Mimic::Engine::Base).to receive(:log_file).and_return(log_path)
+      process = Mimic::Engine::ServerProcess.new(pid_file: @dir / "server.pid", log_file: log_path,
+                                           proc_scan_fallback: true)
+      allow(Mimic::Engine::ServerProcess).to receive(:chat).and_return(process)
       launcher = instance_double(Mimic::Engine::Launcher)
       allow(launcher).to receive(:spawn) { log_path.write("ggml_cuda_init: failed\n", mode: "a") and 4242 }
       allow(Mimic::Engine::Launcher).to receive(:new).and_return(launcher)
       allow(Mimic::Util::Probes).to receive(:wait_ready).and_return(false)
-      allow(Mimic::Engine::Base).to receive(:cleanup_failed)
+      allow(process).to receive(:cleanup_failed)
 
       result = described_class.new(settings).start
 
       expect(result.ok?).to be false
       expect(result.message).to include("llama-server failed to start", "ggml_cuda_init: failed")
-      expect(Mimic::Engine::Base).to have_received(:cleanup_failed).with(4242)
+      expect(process).to have_received(:cleanup_failed).with(4242)
     end
 
     it "writes the preset before spawning, and spawns the binary it found" do
@@ -246,11 +194,13 @@ RSpec.describe Mimic::Engine::Llama do
       allow(Mimic::Util::Probes).to receive(:wait_ready).and_return(true)
       allow(Mimic::Util::Probes).to receive(:wait_until).and_return(true)
       allow(Mimic::Util::Probes).to receive(:descendants).with(4242).and_return([4243])
-      allow(Mimic::Model::Vram).to receive(:measured_overhead_mib)
-        .with("/models/foo-Q4_K_M.gguf", 4096, "q8_0", pids: [4242, 4243]).and_return(2431)
+      measured = instance_double(Mimic::Model::Footprint)
+      allow(measured).to receive(:measured_overhead_mib).with(pids: [4242, 4243]).and_return(2431)
+      expect_any_instance_of(Mimic::Model).to receive(:footprint)
+        .with(4096, "q8_0", compute_mib: 0).and_return(measured)
 
       expect(described_class.new(settings).start.ok?).to be true
-      expect(Mimic::Model.new("/models/foo-Q4_K_M.gguf").compute_mib(4096, "q8_0")).to eq(2431)
+      expect(Mimic::Model.new("/models/foo-Q4_K_M.gguf").memory.compute_mib(4096, "q8_0")).to eq(2431)
     end
 
     it "records nothing when the instance's VRAM cannot be measured" do
@@ -260,26 +210,13 @@ RSpec.describe Mimic::Engine::Llama do
       allow(Mimic::Util::Probes).to receive(:wait_ready).and_return(true)
       allow(Mimic::Util::Probes).to receive(:wait_until).and_return(true)
       allow(Mimic::Util::Probes).to receive(:descendants).and_return([])
-      allow(Mimic::Model::Vram).to receive(:measured_overhead_mib).and_return(nil)
+      allow_any_instance_of(Mimic::Model).to receive(:footprint).and_return(
+        instance_double(Mimic::Model::Footprint, measured_overhead_mib: nil),
+      )
 
       expect(described_class.new(settings).start.ok?).to be true
       expect(Mimic::LlmConfig::MODEL_COMPUTE_PATH).not_to exist
     end
   end
 
-  describe ".cleanup_failed" do
-    # Regression: both engines are spawned with pgroup: true because router
-    # mode's real model process is a grandchild the router respawns -- but
-    # cleanup only signals the direct pid, leaving the grandchild (and its
-    # VRAM) orphaned.
-    it "signals the process group, not only the direct pid" do
-      allow(described_class).to receive(:pid_file).and_return(Pathname.new("/nope/absent.pid"))
-      allow(Mimic::Util::Probes).to receive(:child_alive?).with(4242).and_return(true)
-      allow(Process).to receive(:waitpid)
-
-      expect(Process).to receive(:kill).with("TERM", -4242)
-
-      described_class.cleanup_failed(4242)
-    end
-  end
 end

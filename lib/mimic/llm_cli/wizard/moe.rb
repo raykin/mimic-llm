@@ -1,6 +1,6 @@
 require_relative "../../ui"
 require_relative "../../engine"
-require_relative "../../model/vram"
+require_relative "../../model/footprint"
 require_relative "../../model"
 
 module Mimic
@@ -37,7 +37,7 @@ module Mimic
         def choose_model(paths)
           step(1, "Model")
           choices = paths.to_h do |path|
-            cached = Model.new(path).n_cpu_moe
+            cached = Model.new(path).memory.n_cpu_moe
             ["#{File.basename(path)}#{cached ? " (cached: #{cached})" : ''}", path]
           end
           @prompt.select("MoE model:", choices)
@@ -45,7 +45,7 @@ module Mimic
 
         def choose_action(path)
           step(2, "n_cpu_moe")
-          puts "Current cached value: #{Model.new(path).n_cpu_moe || 'none (auto-tunes from 0 on next start)'}"
+          puts "Current cached value: #{Model.new(path).memory.n_cpu_moe || 'none (auto-tunes from 0 on next start)'}"
           @prompt.select("What do you want to do?", [
                            { name: "Set a value (0-#{ceiling(path)})", value: :set },
                            { name: "Clear cached value", value: :clear },
@@ -55,17 +55,17 @@ module Mimic
 
         def set_value(path)
           limit = ceiling(path)
-          value = @prompt.ask("Layers to offload to CPU (0-#{limit}):", convert: :int, default: Model.new(path).n_cpu_moe || 0)
+          value = @prompt.ask("Layers to offload to CPU (0-#{limit}):", convert: :int, default: Model.new(path).memory.n_cpu_moe || 0)
           abort "n_cpu_moe must be between 0 and #{limit}" unless value.between?(0, limit)
 
-          Model.new(path).remember_n_cpu_moe(value)
+          Model.new(path).memory.remember_n_cpu_moe(value)
           puts "#{Ui.green('Set')} #{File.basename(path)} n_cpu_moe=#{value}"
         end
 
         def clear_value(path)
-          abort "no cached value to clear for #{File.basename(path)}" if Model.new(path).n_cpu_moe.nil?
+          abort "no cached value to clear for #{File.basename(path)}" if Model.new(path).memory.n_cpu_moe.nil?
 
-          Model.new(path).forget_n_cpu_moe
+          Model.new(path).memory.forget_n_cpu_moe
           puts "#{Ui.green('Cleared')} #{File.basename(path)}"
         end
 

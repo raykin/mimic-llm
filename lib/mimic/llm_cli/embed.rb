@@ -2,7 +2,7 @@ require_relative "../ui"
 require_relative "base"
 require_relative "wizard/embed"
 require_relative "../llm_config"
-require_relative "wizard/setup"
+require_relative "../model/library"
 require_relative "../engine/llama_embed"
 
 module Mimic
@@ -26,7 +26,7 @@ module Mimic
 
       desc "stop", "stop the embedding server"
       def stop
-        puts "embedding server: #{Engine::LlamaEmbed.stop ? 'stopped' : 'was not running'}"
+        puts "embedding server: #{Engine::ServerProcess.embed.stop ? 'stopped' : 'was not running'}"
       end
 
       desc "restart", "stop then start the embedding server"
@@ -65,7 +65,7 @@ module Mimic
       private
 
       def embedding_models(cfg)
-        Wizard::Setup.new(cfg, prompt: @prompt).embedding_models
+        Model::Library.new(cfg).embedding
       end
     end
   end

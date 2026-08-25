@@ -96,12 +96,12 @@ module Mimic
         end
 
         model_path = @settings.model.path.to_s
-        n_cpu_moe = [@settings.model.file.n_cpu_moe || 0, preflight_offload(model_path)].max
+        n_cpu_moe = [@settings.model.file.memory.n_cpu_moe || 0, preflight_offload(model_path)].max
         loop do
           puts "[ik_llama] offloading MoE experts of first #{n_cpu_moe} layers to CPU" if n_cpu_moe.positive?
           pid = launch(binary, n_cpu_moe)
           if Util::Probes.wait_ready(models_url, alive: -> { Util::Probes.child_alive?(pid) }, label: "waiting for ik_llama server")
-            @settings.model.file.remember_n_cpu_moe(n_cpu_moe)
+            @settings.model.file.memory.remember_n_cpu_moe(n_cpu_moe)
             @settings.remember_ctx if remember
             @settings.remember_sampling if remember
             record_compute(pid)
@@ -109,11 +109,11 @@ module Mimic
             return Result.ok("ik_llama server ready (pid #{pid})")
           end
 
-          tail = self.class.log_tail
+          tail = process.log_tail
           blocker = self.class.retry_blocker(tail, n_cpu_moe)
-          Base.cleanup_failed(pid)
+          process.cleanup_failed(pid)
           if blocker
-            return Result.error("ik_llama server failed to start -- #{blocker}. See #{self.class.log_file}\n#{Base.last_lines(tail)}")
+            return Result.error("ik_llama server failed to start -- #{blocker}. See #{process.log_file}\n#{process.last_lines(tail)}")
           end
           ceiling = [CPU_MOE_MAX, self.class.meta_int(tail, "n_layer") || CPU_MOE_MAX].min
           n_cpu_moe = [n_cpu_moe + CPU_MOE_STEP, ceiling].min
@@ -128,13 +128,14 @@ module Mimic
       # estimate up front instead of waiting for a crash that never reaches
       # the loop.
       def preflight_offload(model_path)
-        est = @settings.model.file.preflight(@settings.model.context_length, @settings.llama.cache_type,
-                                        compute_mib: @settings.model.file.compute_mib(@settings.model.context_length,
-                                                                                  @settings.llama.cache_type))
-        return 0 if est.nil? || est[:fits]
+        model = @settings.model.file
+        ctx = @settings.model.context_length
+        cache_type = @settings.llama.cache_type
+        estimate = model.footprint(ctx, cache_type, compute_mib: model.memory.compute_mib(ctx, cache_type))
+        return 0 if !estimate.measurable? || estimate.fits?
 
         ceiling = [CPU_MOE_MAX, Model::Header.new(model_path).block_count || CPU_MOE_MAX].min
-        Model::Vram.layers_to_offload(model_path, deficit_mib: est[:need_mib] - est[:budget_mib], ceiling: ceiling) || 0
+        estimate.layers_to_offload(ceiling: ceiling) || 0
       end
 
       def build_command(binary, n_cpu_moe = 0)

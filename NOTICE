@@ -1,0 +1,16 @@
+mimic-llm bundles one file it did not write:
+
+  lib/mimic/agent/codex_fallback_prompt.md
+
+It is a verbatim copy of the Codex CLI system prompt, taken from
+unslothai/unsloth (unsloth_cli/codex_fallback_prompt.md), which in turn carries
+it from OpenAI's Codex CLI. Both projects are licensed under the Apache License
+2.0:
+
+  https://www.apache.org/licenses/LICENSE-2.0
+
+The file is unmodified. `Mimic::Agent::Codex` reads it as the `base_instructions`
+of the model catalog entry it writes for Codex, because a local llama.cpp server
+has no hosted backend to supply them.
+
+The rest of mimic-llm is MIT licensed -- see LICENSE.

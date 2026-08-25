@@ -23,7 +23,7 @@ module Mimic
       # it cannot render.
       def reasoning = section.fetch("reasoning", "auto")
 
-      def sampling = Sampling.new(file.sampling_for(reasoning: reasoning))
+      def sampling = Sampling.new(file.memory.sampling_for(reasoning: reasoning))
 
       def file
         @file = Model.new(path) if @file.nil? || @file.path.to_s != path
@@ -34,7 +34,7 @@ module Mimic
       # llama-server refuses to boot on a missing --mmproj, so an entry that
       # no longer resolves counts as no entry.
       def mmproj_path
-        stored = @pending_mmproj_set ? @pending_mmproj : MmprojStore.recall(path)
+        stored = @pending_mmproj_set ? @pending_mmproj : file.memory.mmproj
         stored if stored && File.exist?(stored)
       end
 
@@ -56,7 +56,7 @@ module Mimic
       end
 
       def save
-        MmprojStore.remember(path, @pending_mmproj) if @pending_mmproj_set
+        file.memory.mmproj = @pending_mmproj if @pending_mmproj_set
       end
 
       private

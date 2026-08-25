@@ -1,6 +1,6 @@
 require "pathname"
 require_relative "../paths"
-require_relative "../model/schema"
+require_relative "../model/header"
 require_relative "../model"
 require_relative "../util/probes"
 

@@ -3,16 +3,17 @@ require_relative "base"
 require_relative "embed"
 require_relative "paths"
 require_relative "update"
-require_relative "wizard/benchmark"
+require_relative "wizard/parallel"
 require_relative "../engine_cli"
 require_relative "../llm_config"
-require_relative "models_table"
+require_relative "models"
 require_relative "wizard/moe"
+require_relative "../model/library"
 require_relative "../util/probes"
 require_relative "../result"
 require_relative "../engine_cli/status"
 require_relative "wizard/setup"
-require_relative "../clients"
+require_relative "../client"
 require_relative "../engine/llama_embed"
 
 # LLM CLI -- owns llama.cpp / ik_llama.cpp management.
@@ -22,8 +23,6 @@ require_relative "../engine/llama_embed"
 #   binary, model, context preset).
 module Mimic
   module LlmCli
-    # The `llm` command itself -- everything that acts on llama-server
-    # directly, plus the three subcommand trees hung off it.
     class Root < Base
       desc "setup", "interactive LLM setup wizard"
       def setup
@@ -37,7 +36,7 @@ module Mimic
 
       desc "stop", "stop llama-server"
       def stop
-        stopped = Engine::Base.stop(exclude: Engine::LlamaEmbed.pids)
+        stopped = Engine::ServerProcess.chat.stop(exclude: Engine::ServerProcess.embed.pids)
         puts "llama-server: #{stopped ? 'stopped' : 'was not running'}"
       end
 
@@ -62,14 +61,11 @@ module Mimic
 
       desc "moe", "interactive wizard to view/set/clear a MoE model's cached --n-cpu-moe value"
       def moe
-        Wizard::Moe.new(wizard.scan_gguf, prompt: @prompt).run
+        Wizard::Moe.new(Model::Library.new(LlmConfig.load).all, prompt: @prompt).run
       end
 
-      desc "models", "list available GGUF models"
-      def models
-        cfg = LlmConfig.load
-        LlmCli::ModelsTable.new(cfg, wizard.scan_gguf).render
-      end
+      desc "models SUBCOMMAND", "list available GGUF models"
+      subcommand "models", Models
 
       desc "update SUBCOMMAND", "check for updates and rebuild"
       subcommand "update", Update
@@ -86,23 +82,23 @@ module Mimic
         LlmCli::Configure.run
       end
 
-      desc "sync", "push the active LLM config to #{Clients::CLIENTS.join(', ')}"
+      desc "sync", "push the active LLM config to #{Client::CLIENTS.join(', ')}"
       def sync(cfg = nil)
         cfg ||= LlmConfig.load
-        synced = Clients.sync(cfg)
+        synced = Client.sync(cfg)
         synced.each { |name| puts "#{Ui.green('synced')} #{name}" }
         puts Ui.yellow("no SWE agent configs found") if synced.empty?
         synced
       end
 
-      desc "benchmark", "restart with n_slots/ctx overrides for throughput testing (not persisted)"
+      desc "parallel", "restart with n_slots/ctx overrides so several tasks can run at once (not persisted)"
       method_option :slots, type: :numeric, desc: "n_slots override"
       method_option :ctx, type: :numeric, desc: "context_length override"
-      def benchmark
-        cfg = benchmark_config(require_config)
+      def parallel
+        cfg = parallel_config(require_config)
 
         stop
-        return unless wait_for_release(cfg, "benchmark start")
+        return unless wait_for_release(cfg, "parallel start")
 
         report(EngineCli::Registry.for(cfg).start(remember: false))
       end
@@ -121,8 +117,8 @@ module Mimic
         @wizard ||= Wizard::Setup.new(LlmConfig.load, prompt: @prompt)
       end
 
-      def benchmark_config(cfg)
-        return Wizard::Benchmark.new(cfg, wizard, prompt: @prompt).run unless options[:slots] || options[:ctx]
+      def parallel_config(cfg)
+        return Wizard::Parallel.new(cfg, wizard, prompt: @prompt).run unless options[:slots] || options[:ctx]
 
         cfg.llama.n_slots = options[:slots].to_i if options[:slots]
         cfg.model.context_length = options[:ctx].to_i if options[:ctx]
@@ -171,7 +167,7 @@ module Mimic
       end
 
       def released?(cfg)
-        Util::Probes.find_pid_by_cmd("llama-server", exclude: Engine::LlamaEmbed.pids).nil? &&
+        Util::Probes.find_pid_by_cmd("llama-server", exclude: Engine::ServerProcess.embed.pids).nil? &&
           Util::Probes.port_free?(cfg.llama.host, cfg.llama.port.to_i)
       end
     end

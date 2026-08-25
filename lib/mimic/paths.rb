@@ -24,13 +24,16 @@ module Mimic
 
     STATE_DIR = Pathname.new(Dir.home) / ".mimic"
 
-    # Upstream nests agent homes as `auth_root()/agents/<name>`, which under
-    # a root already called unsloth-agents just repeats itself. agent.rb
+    # Opt-in MCP servers for the agents mimic launches, in Claude Code's own
+    # `mcpServers` shape. Absent means mimic wires none -- it ships no server
+    # of its own and picks none for you.
+    MCP_SERVERS_PATH = STATE_DIR / "mcp-servers.json"
+
+    # Upstream nests agent homes as `auth_root()/agents/<name>`; agent.rb
     # collapses that level, so homes land directly in AGENTS_DIR. Claude is
     # the one agent whose home mimic passes in itself (CLAUDE_CONFIG_DIR);
     # it reads AGENTS_DIR to sit beside the rest.
-    AUTH_ROOT = STATE_DIR / "unsloth-agents"
-    AGENTS_DIR = AUTH_ROOT
+    AGENTS_DIR = STATE_DIR / "agents"
     CLAUDE_CONFIG_DIR = AGENTS_DIR / "claude"
   end
 end

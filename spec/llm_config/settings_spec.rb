@@ -102,13 +102,13 @@ RSpec.describe Mimic::LlmConfig::Settings do
     it "records what the run launched with, under the choice it was taken at" do
       settings_for("auto").remember_sampling
 
-      expect(settings_for("auto").model.file.last_sampling(reasoning: "auto"))
+      expect(settings_for("auto").model.file.memory.last_sampling(reasoning: "auto"))
         .to eq(Mimic::LlmConfig::Sampling::DEFAULTS)
-      expect(settings_for("off").model.file.last_sampling(reasoning: "off")).to be_nil
+      expect(settings_for("off").model.file.memory.last_sampling(reasoning: "off")).to be_nil
     end
 
     it "is what a later start replays instead of resolving again" do
-      settings_for("auto").model.file.remember_sampling("auto", "temperature" => 0.42)
+      settings_for("auto").model.file.memory.remember_sampling("auto", "temperature" => 0.42)
 
       expect(settings_for("auto").model.sampling.to_h).to include("temp" => 0.42)
     end
@@ -116,7 +116,7 @@ RSpec.describe Mimic::LlmConfig::Settings do
     # Re-running setup re-chooses; a value an earlier run settled on must not
     # survive into the preset written for the new choices.
     it "forgets the record so the next start resolves from scratch" do
-      settings_for("auto").model.file.remember_sampling("auto", "temperature" => 0.42)
+      settings_for("auto").model.file.memory.remember_sampling("auto", "temperature" => 0.42)
       settings_for("auto").forget_sampling
 
       expect(settings_for("auto").model.sampling.to_h).to include("temp" => 0.8)
@@ -243,7 +243,7 @@ RSpec.describe Mimic::LlmConfig::Settings do
     end
 
     # model_path can change without ever running the setup wizard's
-    # choose_mmproj step (llm_configure's "model.path" key, benchmark_wizard,
+    # choose_mmproj step (llm_configure's "model.path" key, parallel_wizard,
     # or a hand-edited config.yaml). Keying the store by model path, like
     # CtxStore, means an unvisited model just has no entry -- there is no
     # stale value left over from whatever model was active before.

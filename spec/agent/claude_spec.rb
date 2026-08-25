@@ -104,48 +104,104 @@ RSpec.describe Mimic::Agent::Claude do
       expect(agent.env["COMMENT_GATE_OFF"]).to eq("1")
     end
 
-    it "adds the c4ai server to an empty seed" do
-      Dir.mktmpdir do |dir|
+    # MCP servers are opt-in: mimic wires whatever ~/.mimic/mcp-servers.json
+    # names and nothing at all when that file is absent.
+    describe "MCP servers" do
+      def seeded(dir, seed_data, servers: :none)
         config_dir = Pathname.new(dir) / "claude-config"
         config_dir.mkpath
-        (config_dir / ".claude.json").write(JSON.generate({}))
+        (config_dir / ".claude.json").write(JSON.generate(seed_data))
         stub_const("Mimic::Paths::CLAUDE_CONFIG_DIR", config_dir)
+        servers_file = Pathname.new(dir) / "mcp-servers.json"
+        servers_file.write(servers) unless servers == :none
+        stub_const("Mimic::Paths::MCP_SERVERS_PATH", servers_file)
         allow(described_class).to receive(:find_binary).and_return(nil)
-
-        agent.env
-
-        data = JSON.parse((config_dir / ".claude.json").read)
-        expect(data["mcpServers"]["c4ai"]).to eq(described_class::C4AI_MCP_SERVER)
+        config_dir / ".claude.json"
       end
-    end
 
-    it "preserves Claude Code's own runtime state alongside the merge" do
-      Dir.mktmpdir do |dir|
-        config_dir = Pathname.new(dir) / "claude-config"
-        config_dir.mkpath
-        (config_dir / ".claude.json").write(JSON.generate({ "hasCompletedOnboarding" => true, "numStartups" => 7 }))
-        stub_const("Mimic::Paths::CLAUDE_CONFIG_DIR", config_dir)
-        allow(described_class).to receive(:find_binary).and_return(nil)
+      let(:c4ai) { { "command" => "python", "args" => ["-m", "c4ai_mcp.fastmcp_server"] } }
 
-        agent.env
+      it "wires nothing when no mcp-servers.json exists" do
+        Dir.mktmpdir do |dir|
+          seed = seeded(dir, {})
 
-        data = JSON.parse((config_dir / ".claude.json").read)
-        expect(data["numStartups"]).to eq(7)
-        expect(data["hasCompletedOnboarding"]).to be true
-        expect(data["mcpServers"]["c4ai"]).to eq(described_class::C4AI_MCP_SERVER)
+          agent.env
+
+          expect(JSON.parse(seed.read)).not_to have_key("mcpServers")
+        end
       end
-    end
 
-    it "does not rewrite the file when the entry is already current" do
-      Dir.mktmpdir do |dir|
-        config_dir = Pathname.new(dir) / "claude-config"
-        config_dir.mkpath
-        seed = config_dir / ".claude.json"
-        seed.write(JSON.generate({ "mcpServers" => { "c4ai" => described_class::C4AI_MCP_SERVER } }))
-        stub_const("Mimic::Paths::CLAUDE_CONFIG_DIR", config_dir)
-        allow(described_class).to receive(:find_binary).and_return(nil)
+      it "merges every server the file names into an empty seed" do
+        Dir.mktmpdir do |dir|
+          seed = seeded(dir, {}, servers: JSON.generate({ "c4ai" => c4ai, "other" => { "command" => "srv" } }))
 
-        expect { agent.env }.not_to(change { seed.mtime })
+          agent.env
+
+          servers = JSON.parse(seed.read)["mcpServers"]
+          expect(servers["c4ai"]).to eq(c4ai)
+          expect(servers["other"]).to eq({ "command" => "srv" })
+        end
+      end
+
+      it "preserves Claude Code's own runtime state alongside the merge" do
+        Dir.mktmpdir do |dir|
+          seed = seeded(dir, { "hasCompletedOnboarding" => true, "numStartups" => 7 },
+                        servers: JSON.generate({ "c4ai" => c4ai }))
+
+          agent.env
+
+          data = JSON.parse(seed.read)
+          expect(data["numStartups"]).to eq(7)
+          expect(data["hasCompletedOnboarding"]).to be true
+          expect(data["mcpServers"]["c4ai"]).to eq(c4ai)
+        end
+      end
+
+      # A server the user added by hand in Claude Code stays put.
+      it "leaves entries it does not own alone" do
+        Dir.mktmpdir do |dir|
+          seed = seeded(dir, { "mcpServers" => { "mine" => { "command" => "hand-rolled" } } },
+                        servers: JSON.generate({ "c4ai" => c4ai }))
+
+          agent.env
+
+          expect(JSON.parse(seed.read)["mcpServers"]["mine"]).to eq({ "command" => "hand-rolled" })
+        end
+      end
+
+      it "does not rewrite the file when every named server is already current" do
+        Dir.mktmpdir do |dir|
+          seed = seeded(dir, { "mcpServers" => { "c4ai" => c4ai } }, servers: JSON.generate({ "c4ai" => c4ai }))
+
+          expect { agent.env }.not_to(change { seed.mtime })
+        end
+      end
+
+      # The seed's own rescue would swallow a raise from here, so the reader
+      # is pinned on its own rather than only through merge_mcp_config.
+      describe ".mcp_servers" do
+        it "is empty for a missing file and for one that is not JSON" do
+          Dir.mktmpdir do |dir|
+            broken = Pathname.new(dir) / "broken.json"
+            broken.write("{ not json")
+
+            stub_const("Mimic::Paths::MCP_SERVERS_PATH", Pathname.new(dir) / "absent.json")
+            expect(described_class.mcp_servers).to eq({})
+
+            stub_const("Mimic::Paths::MCP_SERVERS_PATH", broken)
+            expect(described_class.mcp_servers).to eq({})
+          end
+        end
+      end
+
+      it "wires nothing when mcp-servers.json is not valid JSON" do
+        Dir.mktmpdir do |dir|
+          seed = seeded(dir, {}, servers: "{ not json")
+
+          agent.env
+
+          expect(JSON.parse(seed.read)).not_to have_key("mcpServers")
+        end
       end
     end
   end

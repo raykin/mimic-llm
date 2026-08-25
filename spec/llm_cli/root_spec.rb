@@ -16,6 +16,25 @@ RSpec.describe Mimic::LlmCli::Root do
     allow(Mimic::EngineCli::Registry).to receive(:for).and_return(instance_double(Mimic::Engine::Llama, start: result))
   end
 
+  # Ctrl-C is the only way out of a cli-ui selection, and Thor has no handler
+  # for the Interrupt it raises -- without one the documented exit prints a
+  # backtrace through thor/dispatch.
+  describe ".start" do
+    it "reports the cancellation instead of a backtrace when interrupted" do
+      allow(described_class).to receive(:dispatch).and_raise(Interrupt)
+
+      expect { described_class.start(["setup"]) }.to raise_error(SystemExit)
+        .and output(/cancelled/).to_stderr
+    end
+
+    it "exits 130, the conventional status for an interrupt" do
+      allow(described_class).to receive(:dispatch).and_raise(Interrupt)
+
+      expect { described_class.start(["setup"]) }
+        .to raise_error(SystemExit) { |error| expect(error.status).to eq(130) }
+    end
+  end
+
   describe "#start" do
     it "prints the engine's message and exits 0 when it started" do
       stub_config
@@ -60,17 +79,100 @@ RSpec.describe Mimic::LlmCli::Root do
       engine = instance_double(Mimic::Engine::Llama)
       allow(engine).to receive(:render_preset) { order << :render }
       allow(Mimic::EngineCli::Registry).to receive(:for).and_return(engine)
-      allow(Mimic::Clients).to receive(:sync).and_return([])
+      allow(Mimic::Client).to receive(:sync).and_return([])
 
       expect { cli.setup }.to output.to_stdout
       expect(order).to eq(%i[forget render])
     end
   end
 
+  # Renamed from `benchmark` 2026-08-18: the command sizes concurrent request
+  # slots so several tasks can run at once, which a benchmark is not.
+  describe "#parallel" do
+    subject(:cli) { described_class.new([], options) }
+
+    before do
+      allow(Mimic::Engine::ServerProcess).to receive_messages(
+        chat: instance_double(Mimic::Engine::ServerProcess, stop: true),
+        embed: instance_double(Mimic::Engine::ServerProcess, pids: []),
+      )
+      allow(Mimic::Util::Probes).to receive(:wait_until).and_return(true)
+    end
+
+    context "with slot and context overrides" do
+      let(:options) { { slots: 4, ctx: 2048 } }
+
+      it "applies them to this run only" do
+        settings = stub_config
+        engine = instance_double(Mimic::Engine::Llama, start: Mimic::Result.ok("ready"))
+        allow(Mimic::EngineCli::Registry).to receive(:for).and_return(engine)
+        # Stubbed even though this path must not reach it: unstubbed, a
+        # regression here opens the real cli-ui wizard and the run blocks on
+        # a prompt instead of failing.
+        allow(Mimic::LlmCli::Wizard::Parallel).to receive(:new)
+
+        expect { cli.parallel }.to output(/ready/).to_stdout
+        expect(engine).to have_received(:start).with(remember: false)
+        expect(settings.llama.n_slots).to eq(4)
+        expect(settings.model.context_length).to eq(2048)
+      end
+
+      it "does not open the wizard" do
+        stub_config
+        allow(Mimic::EngineCli::Registry).to receive(:for)
+          .and_return(instance_double(Mimic::Engine::Llama, start: Mimic::Result.ok("ready")))
+        allow(Mimic::LlmCli::Wizard::Parallel).to receive(:new)
+
+        expect { cli.parallel }.to output(/ready/).to_stdout
+        expect(Mimic::LlmCli::Wizard::Parallel).not_to have_received(:new)
+      end
+    end
+
+    context "with neither override" do
+      let(:options) { {} }
+
+      it "asks the wizard for the slot and context pair" do
+        settings = stub_config
+        wizard = instance_double(Mimic::LlmCli::Wizard::Parallel, run: settings)
+        allow(Mimic::LlmCli::Wizard::Parallel).to receive(:new).and_return(wizard)
+        allow(Mimic::EngineCli::Registry).to receive(:for)
+          .and_return(instance_double(Mimic::Engine::Llama, start: Mimic::Result.ok("ready")))
+
+        expect { cli.parallel }.to output(/ready/).to_stdout
+        expect(wizard).to have_received(:run)
+      end
+    end
+  end
+
+  describe "#stop" do
+    # The chat server may fall back to a /proc scan for "llama-server", which
+    # the embedding server also is -- so its pids are excluded by name.
+    it "stops the chat server while leaving the embedding server's pids alone" do
+      chat = instance_double(Mimic::Engine::ServerProcess, stop: true)
+      allow(Mimic::Engine::ServerProcess).to receive_messages(
+        chat: chat, embed: instance_double(Mimic::Engine::ServerProcess, pids: [900, 901]),
+      )
+
+      expect { cli.stop }.to output("llama-server: stopped\n").to_stdout
+      expect(chat).to have_received(:stop).with(exclude: [900, 901])
+    end
+
+    it "says so when nothing was running" do
+      allow(Mimic::Engine::ServerProcess).to receive_messages(
+        chat: instance_double(Mimic::Engine::ServerProcess, stop: false),
+        embed: instance_double(Mimic::Engine::ServerProcess, pids: []),
+      )
+
+      expect { cli.stop }.to output("llama-server: was not running\n").to_stdout
+    end
+  end
+
   describe "#restart" do
     before do
-      allow(Mimic::Engine::Base).to receive(:stop).and_return(true)
-      allow(Mimic::Engine::LlamaEmbed).to receive(:pids).and_return([])
+      allow(Mimic::Engine::ServerProcess).to receive_messages(
+        chat: instance_double(Mimic::Engine::ServerProcess, stop: true),
+        embed: instance_double(Mimic::Engine::ServerProcess, pids: []),
+      )
       # One pass through the real released? predicate, without the 30 s poll.
       allow(Mimic::Util::Probes).to receive(:wait_until) { |**_, &block| block.call }
     end

@@ -100,7 +100,7 @@ module Mimic
       end
 
       # Relocate the fields that used to sit flat in config.yaml:
-      # model.mmproj_path (now per model, in MmprojStore) and a plain
+      # model.mmproj_path (now per model, in Model::Memory) and a plain
       # llama.binary string (now per engine). Both are relocated with the
       # attribution they had when they were written -- the projector to the
       # model that is configured, the binary to the engine that is configured
@@ -125,20 +125,6 @@ module Mimic
         Sampling::KEYS.each { |key| cfg["model"].delete(key) }
         settings.save
         settings
-      end
-    end
-
-    module MmprojStore
-      class << self
-        def recall(model_path) = store.fetch(model_path)
-
-        def remember(model_path, mmproj_path)
-          mmproj_path.nil? ? store.delete(model_path) : store.write(model_path, mmproj_path)
-        end
-
-        private
-
-        def store = Model::Store.new(MODEL_MMPROJ_PATH)
       end
     end
   end
