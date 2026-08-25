@@ -13,7 +13,7 @@ module Mimic
   # with the per-model facts that decide whether it will actually run.
   module LlmCli
     class ModelsTable
-      HEADER = ["", "Alias", "Quant", "Size", "MoE", "Vision", "Embed", "n_cpu_moe", "Template", "Last Ctx", "Path"].freeze
+      HEADER = ["", "Alias", "Quant", "Size", "MoE", "MTP", "Vision", "n_cpu_moe", "Template", "Last Ctx", "Path"].freeze
       ALIAS_WIDTH = 44
       PATH_WIDTH = 20
 
@@ -48,8 +48,8 @@ module Mimic
           path.basename(".*").to_s.delete_prefix(base_alias).sub(/\A-/, ""),
           Util::Fmt.human_size(real.size),
           moe_mark(real),
+          model.supports_mtp? ? Ui.green("✓") : "",
           model.vision? ? Ui.green("✓") : "",
-          model.embedding? ? Ui.green("✓") : "",
           remembered.memory.n_cpu_moe&.to_s || "",
           template_for(base_alias).file? ? "✓" : "",
           last_ctx(remembered),

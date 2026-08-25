@@ -158,8 +158,20 @@ RSpec.describe Mimic::Model::Header do
       expect(described_class.new(path).ternary_packing).to eq(:g64)
     end
 
-    it "reports a type no engine here defines as unsupported" do
-      path = ternary_model("legacy.gguf", type: 142, block_weights: 128, block_bytes: 34)
+    it "recognizes the current Prism PQ2_0 type" do
+      path = ternary_model("bonsai-2.gguf", type: 142, block_weights: 128, block_bytes: 34)
+
+      expect(described_class.new(path).ternary_packing).to eq(:pq2)
+    end
+
+    it "recognizes the current Prism PTQ1_0 type" do
+      path = ternary_model("bonsai-2-ptq1.gguf", type: 143, block_weights: 128, block_bytes: 28)
+
+      expect(described_class.new(path).ternary_packing).to eq(:ptq1)
+    end
+
+    it "reports other private types as unsupported" do
+      path = ternary_model("private.gguf", type: 144, block_weights: 128, block_bytes: 34)
 
       expect(described_class.new(path).ternary_packing).to eq(:unsupported)
     end

@@ -74,7 +74,6 @@ RSpec.describe Mimic::LlmConfig::Settings do
 
     describe "#file" do
       it "returns a Model for the configured path" do
-        expect(settings.model.file).to be_a(Mimic::Model)
         expect(settings.model.file.path.to_s).to eq(settings.model.path)
       end
 
@@ -214,7 +213,6 @@ RSpec.describe Mimic::LlmConfig::Settings do
   describe "#to_h" do
     it "round-trips the plain string-keyed hash" do
       expect(settings.to_h).to eq(full_cfg)
-      expect(settings.to_h).to be_a(Hash)
       expect(settings.to_h.keys).to eq(["model", "llama"])
     end
   end

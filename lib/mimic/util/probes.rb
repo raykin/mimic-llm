@@ -5,8 +5,11 @@ require "pathname"
 
 module Mimic
   module Util
-    module Probes
-      class << self
+      module Probes
+        STOP_WAIT_ATTEMPTS = 100
+        STOP_WAIT_DELAY = 0.1
+
+        class << self
         def which(name, path = ENV.fetch("PATH", ""))
           path.split(File::PATH_SEPARATOR).each do |dir|
             candidate = Pathname.new(dir) / name
@@ -20,7 +23,7 @@ module Mimic
           req = Net::HTTP::Get.new(uri)
           headers.each { |k, v| req[k] = v }
           Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == "https",
-                           open_timeout: timeout, read_timeout: timeout) { |http| http.request(req) }
+                          open_timeout: timeout, read_timeout: timeout) { |http| http.request(req) }
         end
 
         def post(url, body, timeout: 10)
@@ -29,7 +32,7 @@ module Mimic
           req["Content-Type"] = "application/json"
           req.body = JSON.generate(body)
           Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == "https",
-                           open_timeout: timeout, read_timeout: timeout) { |http| http.request(req) }
+                          open_timeout: timeout, read_timeout: timeout) { |http| http.request(req) }
         rescue StandardError
           nil
         end
@@ -168,7 +171,16 @@ module Mimic
           pid_file.unlink if pid_file.exist?
           return false if pid.nil?
 
-          Process.kill("TERM", group_leader?(pid) ? -pid : pid)
+          group = group_leader?(pid)
+          target = group ? -pid : pid
+          stopped_pids = [pid, *descendants(pid)]
+          Process.kill("TERM", target)
+          return true if wait_for_process_exit(stopped_pids)
+
+          Process.kill("KILL", target)
+          wait_for_process_exit(stopped_pids)
+          true
+        rescue Errno::ESRCH
           true
         end
 
@@ -176,13 +188,20 @@ module Mimic
         #
         # An HTTP probe goes quiet the moment the old server stops serving, but
         # its listening socket outlives that by the whole model-unload
-        # teardown. Both engines bind through cpp-httplib with SO_REUSEADDR, so
-        # mirror that: a TIME_WAIT leftover is not a conflict, a live listener
-        # is.
+        # teardown. Test for a listener first, then mirror the engines' reuse
+        # options when checking whether a new server may bind. Binding with
+        # SO_REUSEPORT alone is not a listener check: it can succeed beside a
+        # live server in the same reuse group.
         def port_free?(host, port)
+          connect_host = { "0.0.0.0" => "127.0.0.1", "::" => "::1" }.fetch(host, host)
+          listener = Socket.tcp(connect_host, port, connect_timeout: 0.2)
+          listener.close
+          return false
+        rescue Errno::ECONNREFUSED
           family = host.include?(":") ? Socket::AF_INET6 : Socket::AF_INET
           probe = Socket.new(family, Socket::SOCK_STREAM)
           probe.setsockopt(Socket::SOL_SOCKET, Socket::SO_REUSEADDR, true)
+          probe.setsockopt(Socket::SOL_SOCKET, Socket::SO_REUSEPORT, true) if defined?(Socket::SO_REUSEPORT)
           begin
             probe.bind(Socket.pack_sockaddr_in(port, host))
           rescue SystemCallError
@@ -191,9 +210,23 @@ module Mimic
             probe.close
           end
           true
+        rescue SystemCallError
+          false
         end
 
         private
+
+        def wait_for_process_exit(pids)
+          wait_until(attempts: STOP_WAIT_ATTEMPTS, delay: STOP_WAIT_DELAY) do
+            pids.all? { |pid| process_exited?(pid) }
+          end
+        end
+
+        def process_exited?(pid)
+          !Process.waitpid(pid, Process::WNOHANG).nil?
+        rescue Errno::ECHILD
+          !pid_alive?(pid)
+        end
 
         def tick(seconds, label)
           return unless label

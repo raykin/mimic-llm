@@ -23,12 +23,19 @@ module Mimic
       BIG_STRING_ARRAY = 4096
       CHUNK = 1 << 20
 
+      # Numeric arrays this short are per-layer shape (head_count_kv, the
+      # sliding-window pattern): one entry per block, kept because the KV
+      # estimate cannot be built without them. Anything longer is vocab-sized
+      # (token types, merge scores) and is skipped like the string tables.
+      BIG_SCALAR_ARRAY = 4096
+
       def initialize(path)
         @path = path.to_s
         @metadata = {}
       end
 
-      # Scalar + string KV pairs. Arrays (vocab/merges) are skipped.
+      # Scalar, string and short-numeric-array KV pairs. Vocab-sized arrays
+      # are skipped.
       def metadata(full: false)
         @metadata[full] ||= read_metadata(full: full)
       end
@@ -66,9 +73,17 @@ module Mimic
               meta[key] = read_scalar(f, vtype)
             elsif vtype == STRING
               meta[key] = read_str(f)
-            elsif !skip_value(f, vtype, full: full)
-              truncated = true
-              break
+            elsif vtype == ARRAY
+              elem_type = u32(f)
+              count = u64(f)
+              if SCALAR_FMT.key?(elem_type) && count <= BIG_SCALAR_ARRAY
+                meta[key] = read_scalar_array(f, elem_type, count)
+              elsif !skip_array(f, elem_type, count, full: full)
+                truncated = true
+                break
+              end
+            else
+              raise ArgumentError, "unknown gguf type #{vtype}"
             end
           end
         end
@@ -106,6 +121,10 @@ module Mimic
       def u32(f) = read_exactly(f, 4).unpack1("L<")
       def u64(f) = read_exactly(f, 8).unpack1("Q<")
       def read_str(f) = read_exactly(f, u64(f)).force_encoding("UTF-8").scrub
+
+      def read_scalar_array(f, elem_type, count)
+        read_exactly(f, SCALAR_SIZE.fetch(elem_type) * count).unpack("#{SCALAR_FMT.fetch(elem_type)}*")
+      end
 
       def read_scalar(f, vtype)
         read_exactly(f, SCALAR_SIZE.fetch(vtype)).unpack1(SCALAR_FMT.fetch(vtype))
@@ -152,26 +171,31 @@ module Mimic
       end
 
       # Returns false when the value was a vocab-sized string array and `full`
-      # is off -- the parse stops there.
+      # is off -- see skip_array.
       def skip_value(f, vtype, full: true)
         if SCALAR_SIZE.key?(vtype)
           f.seek(SCALAR_SIZE[vtype], IO::SEEK_CUR)
         elsif vtype == STRING
           f.seek(u64(f), IO::SEEK_CUR)
         elsif vtype == ARRAY
-          elem_type = u32(f)
-          count = u64(f)
-          if SCALAR_SIZE.key?(elem_type)
-            f.seek(SCALAR_SIZE[elem_type] * count, IO::SEEK_CUR)
-          elsif elem_type == STRING
-            return false if !full && count > BIG_STRING_ARRAY
-
-            skip_string_array(f, count)
-          else
-            raise ArgumentError, "nested array type #{elem_type}"
-          end
+          return skip_array(f, u32(f), u64(f), full: full)
         else
           raise ArgumentError, "unknown gguf type #{vtype}"
+        end
+        true
+      end
+
+      # Returns false when the value was a vocab-sized string array and `full`
+      # is off -- the parse stops there.
+      def skip_array(f, elem_type, count, full: true)
+        if SCALAR_SIZE.key?(elem_type)
+          f.seek(SCALAR_SIZE[elem_type] * count, IO::SEEK_CUR)
+        elsif elem_type == STRING
+          return false if !full && count > BIG_STRING_ARRAY
+
+          skip_string_array(f, count)
+        else
+          raise ArgumentError, "nested array type #{elem_type}"
         end
         true
       end

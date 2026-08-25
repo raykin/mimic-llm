@@ -113,6 +113,40 @@ RSpec.describe Mimic::Model::Footprint do
     end
   end
 
+  describe "the budget against a server that is about to be replaced" do
+    before { allow(Mimic::Util::Host).to receive(:gpu_total_mib).and_return(24_000) }
+
+    # Regression: `llm setup` measures free VRAM while the running server still
+    # holds the model it is reconfiguring, so its 13.4 GB counted as
+    # unavailable, the weights alone overran the budget, and max_ctx clamped to
+    # 0 -- "it will load but crash once context passes ~0 tokens" for a context
+    # that had launched fine from a free card.
+    it "adds back the VRAM the outgoing server is holding" do
+      allow(Mimic::Util::Host).to receive(:gpu_free_mib).and_return(8_142)
+
+      est = Mimic::Model.new(model_path).footprint(100, "q8_0", reclaimable_mib: 13_388)
+
+      expect(est.budget_mib).to eq(8_142 + 13_388)
+    end
+
+    it "budgets the free figure alone when nothing is reclaimable" do
+      allow(Mimic::Util::Host).to receive(:gpu_free_mib).and_return(8_142)
+
+      expect(footprint(model_path).budget_mib).to eq(8_142)
+    end
+
+    # Other processes' VRAM (LM Studio, the browser) is not ours to reclaim,
+    # and the fallback path has no free figure to add to -- the reserve is
+    # already the whole allowance.
+    it "leaves the desktop-reserve fallback alone" do
+      allow(Mimic::Util::Host).to receive(:gpu_free_mib).and_return(nil)
+
+      est = Mimic::Model.new(model_path).footprint(100, "q8_0", reclaimable_mib: 13_388)
+
+      expect(est.budget_mib).to eq(24_000 - described_class::DESKTOP_RESERVE_MIB)
+    end
+  end
+
   describe "the KV estimate" do
     before { allow(Mimic::Util::Host).to receive(:gpu_total_mib).and_return(24_000) }
 
@@ -153,6 +187,110 @@ RSpec.describe Mimic::Model::Footprint do
                        })
 
       expect(kv_mib_of(path)).to be_within(0.01).of(3 * 2 * 64 * 2 * 2.0 * 100 / 1024 / 1024)
+    end
+
+    # Ground truth: gemma-4-31B loaded at ctx 32768, -np 1 -ub 1024 prints
+    # "non-SWA KV cache, size = 32768 cells" at 2560.00 MiB and "SWA KV cache,
+    # size = 2048 cells" at 1600.00 MiB. The shape below is that file's:
+    # 6 layers per group, the last of each full-attention.
+    def gemma4_path
+      path = @dir / "gemma4.gguf"
+      GgufWriter.write(path, {
+                         "general.architecture" => "gemma4",
+                         "gemma4.block_count" => 60,
+                         "gemma4.attention.head_count" => 32,
+                         "gemma4.attention.head_count_kv" => Array.new(60) { |il| il % 6 == 5 ? 4 : 16 },
+                         "gemma4.attention.sliding_window_pattern" => Array.new(60) { |il| il % 6 == 5 ? 0 : 1 },
+                         "gemma4.attention.sliding_window" => 1024,
+                         "gemma4.attention.key_length" => 512,
+                         "gemma4.attention.value_length" => 512,
+                         "gemma4.attention.key_length_swa" => 256,
+                         "gemma4.attention.value_length_swa" => 256,
+                       })
+      path
+    end
+
+    it "charges window layers a fixed cache and full-attention layers per token" do
+      expect(kv_mib_of(gemma4_path, ctx: 32_768)).to be_within(0.01).of(2560 + 1600)
+    end
+
+    it "holds the window layers' cache flat as the context grows" do
+      fixed = ->(ctx) { kv_mib_of(gemma4_path, ctx: ctx) - (0.078125 * ctx) }
+
+      expect(fixed.call(65_536)).to be_within(0.01).of(fixed.call(32_768))
+    end
+
+    it "leaves room for the fixed window cache in max_ctx" do
+      allow(Mimic::Util::Host).to receive(:gpu_free_mib).and_return(24_000)
+      est = footprint(gemma4_path, ctx: 32_768, cache_type: "f16", compute_mib: 0)
+
+      expect(est.max_ctx).to eq(((24_000 - est.weights_mib - 1600) / 0.078125).to_i)
+    end
+
+    # Qwen3.6-35B-A3B: 30 of its 40 layers are gated-delta-net, and ik prints
+    # CUDA0 KV buffer 1932.82 MiB against KV self size 1870.00 -- the 62.81 MiB
+    # difference is this state.
+    def hybrid_path
+      path = @dir / "qwen35moe.gguf"
+      GgufWriter.write(path, {
+                         "general.architecture" => "qwen35moe",
+                         "qwen35moe.block_count" => 40,
+                         "qwen35moe.full_attention_interval" => 4,
+                         "qwen35moe.attention.head_count_kv" => 2,
+                         "qwen35moe.attention.key_length" => 256,
+                         "qwen35moe.attention.value_length" => 256,
+                         "qwen35moe.ssm.conv_kernel" => 4,
+                         "qwen35moe.ssm.inner_size" => 4096,
+                         "qwen35moe.ssm.state_size" => 128,
+                         "qwen35moe.ssm.time_step_rank" => 32,
+                         "qwen35moe.ssm.group_count" => 16,
+                       })
+      path
+    end
+
+    it "charges the linear-attention layers their recurrent state" do
+      expect(kv_mib_of(hybrid_path, ctx: 180_224, cache_type: "q8_0")).to be_within(0.01).of(1932.81)
+    end
+
+    it "holds the recurrent state flat as the context grows" do
+      fixed = ->(ctx) { kv_mib_of(hybrid_path, ctx: ctx) - kv_mib_of(hybrid_path, ctx: 0) }
+
+      expect(fixed.call(180_224) / 180_224).to be_within(1e-9).of(fixed.call(90_112) / 90_112)
+    end
+
+    it "charges the recurrent state per slot" do
+      one = Mimic::Model.new(hybrid_path).footprint(180_224, "q8_0", compute_mib: 0, slots: 1)
+      two = Mimic::Model.new(hybrid_path).footprint(180_224, "q8_0", compute_mib: 0, slots: 2)
+
+      expect(two.kv_mib - one.kv_mib).to be_within(0.01).of(62.81)
+    end
+
+    it "keeps the recurrent state f32 whatever the cache type" do
+      %w[f16 q8_0 q4_0].each do |type|
+        expect(kv_mib_of(hybrid_path, ctx: 0, cache_type: type)).to be_within(0.01).of(62.81)
+      end
+    end
+
+    # Qwen3.8-27B: 65 blocks, the last of them an MTP head that is never a
+    # linear-attention layer, so 48 of the remaining 64 hold state.
+    it "does not count an MTP head as a linear-attention layer" do
+      path = @dir / "qwen35.gguf"
+      GgufWriter.write(path, {
+                         "general.architecture" => "qwen35",
+                         "qwen35.block_count" => 65,
+                         "qwen35.nextn_predict_layers" => 1,
+                         "qwen35.full_attention_interval" => 4,
+                         "qwen35.attention.head_count_kv" => 4,
+                         "qwen35.attention.key_length" => 128,
+                         "qwen35.attention.value_length" => 128,
+                         "qwen35.ssm.conv_kernel" => 4,
+                         "qwen35.ssm.inner_size" => 6144,
+                         "qwen35.ssm.state_size" => 128,
+                         "qwen35.ssm.time_step_rank" => 48,
+                         "qwen35.ssm.group_count" => 16,
+                       })
+
+      expect(kv_mib_of(path, ctx: 0)).to be_within(0.01).of(149.62)
     end
 
     it "charges a quantised cache less per token than f16" do

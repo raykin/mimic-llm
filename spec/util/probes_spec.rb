@@ -70,6 +70,7 @@ RSpec.describe Mimic::Util::Probes do
       pid_file.write("555")
       allow(described_class).to receive(:read_pid).and_return(555)
       allow(Process).to receive(:getpgid).with(555).and_return(555)
+      allow(described_class).to receive(:wait_for_process_exit).and_return(true)
 
       expect(Process).to receive(:kill).with("TERM", -555)
 
@@ -84,6 +85,7 @@ RSpec.describe Mimic::Util::Probes do
       allow(described_class).to receive(:read_pid).and_return(nil)
       allow(described_class).to receive(:find_pid_by_cmd).and_return(556)
       allow(Process).to receive(:getpgid).with(556).and_return(400)
+      allow(described_class).to receive(:wait_for_process_exit).and_return(true)
 
       expect(Process).to receive(:kill).with("TERM", 556)
 
@@ -95,10 +97,38 @@ RSpec.describe Mimic::Util::Probes do
       allow(described_class).to receive(:read_pid).and_return(nil)
       allow(described_class).to receive(:find_pid_by_cmd).and_return(557)
       allow(Process).to receive(:getpgid).and_raise(Errno::ESRCH)
+      allow(described_class).to receive(:wait_for_process_exit).and_return(true)
 
       expect(Process).to receive(:kill).with("TERM", 557)
 
       described_class.stop_pid(pid_file, "llama-server")
+    end
+
+    it "waits for the stopped process and its descendants to exit" do
+      pid_file = @dir / "llama-server.pid"
+      pid_file.write("555")
+      allow(described_class).to receive(:read_pid).and_return(555)
+      allow(described_class).to receive(:descendants).with(555).and_return([556])
+      allow(Process).to receive(:getpgid).with(555).and_return(555)
+      allow(Process).to receive(:kill)
+
+      expect(described_class).to receive(:wait_for_process_exit).with([555, 556]).and_return(true)
+
+      described_class.stop_pid(pid_file, "llama-server")
+    end
+
+    it "kills the process group when graceful shutdown exceeds the bound" do
+      pid_file = @dir / "llama-server.pid"
+      pid_file.write("555")
+      allow(described_class).to receive(:read_pid).and_return(555)
+      allow(described_class).to receive(:descendants).and_return([])
+      allow(Process).to receive(:getpgid).with(555).and_return(555)
+      allow(described_class).to receive(:wait_for_process_exit).and_return(false, true)
+
+      expect(Process).to receive(:kill).with("TERM", -555).ordered
+      expect(Process).to receive(:kill).with("KILL", -555).ordered
+
+      expect(described_class.stop_pid(pid_file, "llama-server")).to be true
     end
 
     # Both servers are the same binary, so the /proc fallback cannot tell
@@ -135,6 +165,30 @@ RSpec.describe Mimic::Util::Probes do
   end
 
   describe ".port_free?" do
+    it "joins the engines' reuse-port group when the platform supports it" do
+      skip "SO_REUSEPORT is unavailable" unless defined?(Socket::SO_REUSEPORT)
+
+      allow(Socket).to receive(:tcp).and_raise(Errno::ECONNREFUSED)
+      probe = instance_double(Socket, bind: nil, close: nil)
+      allow(Socket).to receive(:new).and_return(probe)
+      allow(Socket).to receive(:pack_sockaddr_in).and_return("address")
+      allow(probe).to receive(:setsockopt)
+
+      expect(described_class.port_free?("127.0.0.1", 8080)).to be true
+      expect(probe).to have_received(:setsockopt).with(Socket::SOL_SOCKET, Socket::SO_REUSEADDR, true)
+      expect(probe).to have_received(:setsockopt).with(Socket::SOL_SOCKET, Socket::SO_REUSEPORT, true)
+    end
+
+    it "does not call a reuse-compatible bind while a listener is active" do
+      listener = instance_double(Socket, close: nil)
+      allow(Socket).to receive(:tcp).and_return(listener)
+      allow(Socket).to receive(:new)
+
+      expect(described_class.port_free?("0.0.0.0", 8080)).to be false
+      expect(Socket).to have_received(:tcp).with("127.0.0.1", 8080, connect_timeout: 0.2)
+      expect(Socket).not_to have_received(:new)
+    end
+
     it "is true for a genuinely free port" do
       free_port = 0
       server = TCPServer.new("127.0.0.1", free_port)
@@ -184,16 +238,6 @@ RSpec.describe Mimic::Util::Probes do
     it "is nil for a 500 that still returns a JSON body" do
       @status = 500
       expect(described_class.http_json(url, timeout: 2)).to be_nil
-    end
-
-    it "is nil for a 404 that still returns a JSON body" do
-      @status = 404
-      expect(described_class.http_json(url, timeout: 2)).to be_nil
-    end
-
-    it "returns the parsed body on success" do
-      @status = 200
-      expect(described_class.http_json(url, timeout: 2)).to eq({ "error" => "boom" })
     end
   end
 

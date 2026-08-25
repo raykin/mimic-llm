@@ -22,6 +22,12 @@ module Mimic
     GENERATED_TEMPLATES_DIR = CHAT_TEMPLATES_DIR / "generated"
     PID_DIR = Pathname.new("/tmp/llm")
 
+    # The dev-only command tree is stripped from the published gem, so its
+    # presence on disk is what separates a checkout from an install. One
+    # marker rather than a flag per feature: anything held back from a
+    # release is held back on the same condition.
+    def self.dev_build? = (Pathname.new(__dir__) / "llm_cli/dev").directory?
+
     STATE_DIR = Pathname.new(Dir.home) / ".mimic"
 
     # Opt-in MCP servers for the agents mimic launches, in Claude Code's own

@@ -15,6 +15,8 @@ module Mimic
     # file, and the model-side preparation each of them has to do before
     # spawning it. Subclasses supply the argv and the readiness protocol.
     class Base
+      PORT_RELEASE_ATTEMPTS = 60
+
       def initialize(settings)
         @settings = settings
       end
@@ -36,6 +38,26 @@ module Mimic
 
       def launcher
         Engine::Launcher.new(log_file: process.log_file, pid_file: process.pid_file, chdir: Paths::LLM_RUN_DIR)
+      end
+
+      # A departing server stops answering HTTP the moment it starts unloading,
+      # but keeps its listening socket for the whole teardown -- so `running?`
+      # going false is not permission to bind, and spawning on it dies with
+      # "couldn't bind to server socket".
+      def await_port_release
+        host = @settings.llama.host
+        port = @settings.llama.port.to_i
+        return true if Util::Probes.port_free?(host, port)
+
+        Util::Probes.wait_until(attempts: PORT_RELEASE_ATTEMPTS, delay: 1,
+                                label: "waiting for port #{port} to be released") do
+          Util::Probes.port_free?(host, port)
+        end
+      end
+
+      def port_busy_error(engine)
+        Result.error("#{engine} not started -- #{@settings.llama.host}:#{@settings.llama.port} " \
+                     "is still held by another process")
       end
 
       def first_existing(*candidates)
@@ -81,7 +103,7 @@ module Mimic
       def record_compute(pid)
         pids = [pid, *Util::Probes.descendants(pid)]
         estimate = @settings.model.file.footprint(@settings.model.context_length, @settings.llama.cache_type,
-                                                  compute_mib: 0)
+                                                  compute_mib: 0, slots: @settings.llama.n_slots)
         overhead = estimate.measured_overhead_mib(pids: pids)
         return if overhead.nil?
 

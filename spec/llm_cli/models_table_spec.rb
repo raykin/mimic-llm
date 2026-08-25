@@ -61,25 +61,23 @@ RSpec.describe Mimic::LlmCli::ModelsTable do
       end
     end
 
-    # `llm setup` skips these, so the board has to say why they are missing
-    # from the picker rather than leaving them looking eligible.
-    it "marks an embedding model" do
+    it "marks a model that ships an MTP head" do
       Dir.mktmpdir do |dir|
         root = Pathname.new(dir)
-        model = root / "bge-m3-Q8_0.gguf"
+        model = root / "model.gguf"
         FileUtils.touch(model)
 
         stub_const("Mimic::LlmConfig::BUILTIN_MODEL_DIRS", [root])
         stub_const("Mimic::LlmConfig::MODEL_CTX_PATH", root / "model-ctx.json")
         stub_const("Mimic::Model::Memory::N_CPU_MOE_PATH", root / "ik-n-cpu-moe.json")
         allow_any_instance_of(Mimic::Model::Header).to receive(:moe?).and_return(nil)
-        allow_any_instance_of(Mimic::Model::Header).to receive(:embedding?).and_return(true)
+        allow_any_instance_of(Mimic::Model::Header).to receive(:supports_mtp?).and_return(true)
 
         instance = table({ "model" => { "path" => model.to_s } }, Mimic::Model.pair([[model, root]]))
         rendered = capture_stdout { instance.render }
-        row = rendered.lines.find { |line| line.include?("bge-m3") }
+        row = rendered.lines.find { |line| line.include?("model") }
 
-        expect(rendered).to include("Embed")
+        expect(rendered).to include("MTP")
         expect(row).to include("✓")
       end
     end

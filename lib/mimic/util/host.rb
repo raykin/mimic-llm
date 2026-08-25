@@ -53,6 +53,20 @@ module Mimic
           nil
         end
 
+        # VRAM the driver reports unused right now. Preferred over
+        # total-minus-a-constant: the desktop's real draw moves (2295 MiB
+        # measured against the 2048 the constant assumes), and that quarter
+        # gigabyte is the difference between an estimate that clears the
+        # budget and a launch that dies allocating its compute buffer.
+        def gpu_free_mib
+          out, status = Open3.capture2("nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits")
+          return nil unless status.success?
+
+          Integer(out.lines.first.to_s.strip)
+        rescue Errno::ENOENT, ArgumentError, TypeError
+          nil
+        end
+
         # VRAM held by the given processes. The engine that owns the CUDA
         # context is not always the process we spawned -- llama.cpp's router
         # loads each model in a child -- so the caller passes the whole

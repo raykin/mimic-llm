@@ -2,6 +2,7 @@ require "pathname"
 require "timeout"
 require_relative "../paths"
 require_relative "../util/probes"
+require_relative "../util/host"
 
 module Mimic
   module Engine
@@ -43,10 +44,17 @@ module Mimic
 
       def proc_scan_fallback? = @proc_scan_fallback
 
+      # Both offsets are byte counts (`log_size` is a file size), so the
+      # slicing has to stay on the binary string. Decoding first turns them
+      # into character indexes, and one multi-byte character anywhere in a
+      # long log makes `offset` overshoot the end and the tail come back
+      # empty -- which is how a startup failure printed its own error line to
+      # the log and nothing to the caller.
       def log_tail(offset = 0)
-        text = log_file.binread.force_encoding(Encoding::UTF_8).scrub
-        text = text[offset..] || "" if offset.positive?
-        text[-LOG_TAIL_BYTES..] || text
+        bytes = log_file.binread
+        bytes = bytes.byteslice(offset..) || "" if offset.positive?
+        bytes = bytes.byteslice(-LOG_TAIL_BYTES..) || bytes
+        bytes.force_encoding(Encoding::UTF_8).scrub
       rescue SystemCallError
         ""
       end
@@ -67,6 +75,16 @@ module Mimic
       def pids
         live = Util::Probes.read_pid(pid_file, BINARY)
         live ? [live, *Util::Probes.descendants(live)] : []
+      end
+
+      # VRAM this server is holding, for a preflight that budgets a launch
+      # meant to replace it: the driver's free figure counts it as unavailable,
+      # but stopping this server hands it back.
+      def gpu_mib
+        live = pids
+        return 0 if live.empty?
+
+        Util::Host.gpu_process_mib(live) || 0
       end
 
       def stop(exclude: [])

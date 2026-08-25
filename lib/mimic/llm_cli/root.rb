@@ -23,6 +23,11 @@ require_relative "../engine/llama_embed"
 #   binary, model, context preset).
 module Mimic
   module LlmCli
+    if Mimic::Paths.dev_build?
+      require_relative "dev/debug"
+      require_relative "dev/quality"
+    end
+
     class Root < Base
       desc "setup", "interactive LLM setup wizard"
       def setup
@@ -66,6 +71,20 @@ module Mimic
 
       desc "models SUBCOMMAND", "list available GGUF models"
       subcommand "models", Models
+
+      # `debug` and `quality` are development tools, not product: one restarts
+      # the engines back to back to shake out launch bugs, the other sweeps the
+      # whole model shelf through a benchmark harness that lives in the stack
+      # repo and is not shipped. The gemspec leaves lib/mimic/llm_cli/dev out
+      # of the package, so this directory is absent in an installed gem and the
+      # commands register only in a checkout.
+      if Mimic::Paths.dev_build?
+        desc "debug SUBCOMMAND", "run local engine integration checks"
+        subcommand "debug", Dev::Debug
+
+        desc "quality SUBCOMMAND", "score every model in the library against the local quality harness"
+        subcommand "quality", Dev::Quality::Command
+      end
 
       desc "update SUBCOMMAND", "check for updates and rebuild"
       subcommand "update", Update

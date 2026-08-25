@@ -16,9 +16,9 @@ module Mimic
   #
   # Each rule replaces one guard with what the template should have rendered.
   # `requires` names the constructs the replacement leans on -- a template
-  # that phrases its loop differently gets refused rather than rewritten
-  # wrong, and the hand-written override in CHAT_TEMPLATES_DIR stays the
-  # answer for it.
+  # that phrases its loop differently gets that guard left alone rather than
+  # rewritten wrong, and the hand-written override in CHAT_TEMPLATES_DIR
+  # stays the answer for it.
   module Engine
     class ChatTemplate
       METADATA_KEY = "tokenizer.chat_template".freeze
@@ -107,19 +107,26 @@ module Mimic
 
       def guarded? = source.to_s.include?("raise_exception")
 
-      # The rewritten template, or nil when a guard has no rule or a rule's
-      # replacement would not fit this template.
+      # The rewritten template, or nil when no guard in it has a rule.
+      #
+      # Per guard, not per template: a guard mimic has no rule for is left
+      # standing exactly as the model shipped it, so the shapes that trip it
+      # keep failing the way they already do. Refusing the whole rewrite over
+      # one such guard is what would change behaviour -- it drops repairs that
+      # are correct and leaves a template that 500s on ordinary agent traffic.
       def sanitized
         return nil unless guarded?
 
-        refused = false
+        rewrote = false
         rewritten = source.gsub(RAISE_CALL) do
+          whole = Regexp.last_match(0)
           rule = rule_for(Regexp.last_match(2))
-          next (refused = true) && "" if rule.nil?
+          next whole if rule.nil?
 
+          rewrote = true
           rule.replacement
         end
-        refused ? nil : rewritten
+        rewrote ? rewritten : nil
       end
 
       # Hand-written first: a file the user wrote is a decision, and mimic's

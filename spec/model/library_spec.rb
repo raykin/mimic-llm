@@ -96,14 +96,26 @@ RSpec.describe Mimic::Model::Library do
   end
 
   describe "#chat" do
+    # Every fixture here is MoE so these examples measure the packing rules
+    # alone -- a dense fixture would also trip ik's dense filter and the
+    # expectations would stop saying which rule did the hiding.
     def models_dir
       root = Pathname.new(Dir.mktmpdir)
-      GgufWriter.write(root / "plain.gguf", { "general.architecture" => "llama" },
+      GgufWriter.write(root / "plain.gguf",
+                       { "general.architecture" => "llama", "llama.expert_count" => 8 },
                        tensors: [["blk.0.attn_q.weight", 4096, 12, 4096]])
-      GgufWriter.write(root / "bonsai-g128.gguf", { "general.architecture" => "qwen35" },
+      GgufWriter.write(root / "bonsai-g128.gguf",
+                       { "general.architecture" => "qwen35", "qwen35.expert_count" => 8 },
                        tensors: [["blk.0.attn_q.weight", 34_000, 42, 128_000]])
-      GgufWriter.write(root / "bonsai-g64.gguf", { "general.architecture" => "qwen35" },
+      GgufWriter.write(root / "bonsai-g64.gguf",
+                       { "general.architecture" => "qwen35", "qwen35.expert_count" => 8 },
                        tensors: [["blk.0.attn_q.weight", 18_000, 42, 64_000]])
+      GgufWriter.write(root / "bonsai-2-pq2.gguf",
+                       { "general.architecture" => "qwen35", "qwen35.expert_count" => 8 },
+                       tensors: [["blk.0.attn_q.weight", 34_000, 142, 128_000]])
+      GgufWriter.write(root / "bonsai-2-ptq1.gguf",
+                       { "general.architecture" => "qwen35", "qwen35.expert_count" => 8 },
+                       tensors: [["blk.0.attn_q.weight", 28_000, 143, 128_000]])
       root
     end
 
@@ -119,16 +131,82 @@ RSpec.describe Mimic::Model::Library do
       expect(offered("llama.cpp", root)).to contain_exactly("plain.gguf", "bonsai-g64.gguf")
     end
 
-    it "offers the prism fork only its own G128 ternary models, not plain GGUFs too" do
+    it "offers Bonsai 2 only with the current Prism fork" do
       root = models_dir
 
-      expect(offered("prism-llama.cpp", root)).to contain_exactly("bonsai-g128.gguf")
+      expect(offered("prism-v7-llama.cpp", root)).to contain_exactly("bonsai-2-pq2.gguf", "bonsai-2-ptq1.gguf")
+      expect(offered("llama.cpp", root)).not_to include("bonsai-2-pq2.gguf")
+      expect(offered("llama.cpp", root)).not_to include("bonsai-2-ptq1.gguf")
     end
 
     it "hides every ternary packing from ik_llama.cpp, which has no Q2_0 at all" do
       root = models_dir
 
       expect(offered("ik_llama.cpp", root)).to contain_exactly("plain.gguf")
+    end
+
+    # ik earns its place on --n-cpu-moe, which a dense model has no experts
+    # for. Measured on Qwen3.8-27B-UD-Q4_K_XL: 25.6-29.6 tok/s on ik against
+    # 50.1-51.2 on llama.cpp, same ctx, same quant, same 40/45 score.
+    it "hides a dense model from ik_llama.cpp but keeps it for llama.cpp" do
+      root = Pathname.new(Dir.mktmpdir)
+      GgufWriter.write(root / "dense.gguf", { "general.architecture" => "llama" },
+                       tensors: [["blk.0.attn_q.weight", 4096, 12, 4096]])
+      GgufWriter.write(root / "moe.gguf",
+                       { "general.architecture" => "llama", "llama.expert_count" => 8 },
+                       tensors: [["blk.0.attn_q.weight", 4096, 12, 4096]])
+
+      expect(offered("ik_llama.cpp", root)).to contain_exactly("moe.gguf")
+      expect(offered("llama.cpp", root)).to contain_exactly("dense.gguf", "moe.gguf")
+    end
+
+    # ik's dedicated I-quant CPU GEMM (iqk_gemm_iquants.cpp) only runs on
+    # weights that --n-cpu-moe put in host RAM, so the two levers engage as a
+    # pair and only on MoE. Type 23 is IQ4_XS.
+    it "hides a MoE I-quant from llama.cpp and keeps it for ik_llama.cpp" do
+      root = Pathname.new(Dir.mktmpdir)
+      GgufWriter.write(root / "moe-iq.gguf",
+                       { "general.architecture" => "llama", "llama.expert_count" => 8 },
+                       tensors: [["blk.0.ffn_down_exps.weight", 4096, 23, 4096]])
+
+      expect(offered("llama.cpp", root)).to be_empty
+      expect(offered("ik_llama.cpp", root)).to contain_exactly("moe-iq.gguf")
+    end
+
+    # The pairing is what routes, not the quant on its own: a dense I-quant
+    # has no experts to offload, so ik's kernels never see the weights and
+    # mainline keeps it. Measured -- Qwen3.8-27B UD-IQ4_XS scored 85% on
+    # llama.cpp against 82% on ik at n_cpu_moe=0.
+    it "keeps a dense I-quant on llama.cpp" do
+      root = Pathname.new(Dir.mktmpdir)
+      GgufWriter.write(root / "dense-iq.gguf", { "general.architecture" => "llama" },
+                       tensors: [["blk.0.attn_q.weight", 4096, 23, 4096]])
+
+      expect(offered("llama.cpp", root)).to contain_exactly("dense-iq.gguf")
+    end
+
+    it "says the MoE I-quant was hidden for the pairing, not for being dense" do
+      root = Pathname.new(Dir.mktmpdir)
+      GgufWriter.write(root / "moe-iq.gguf",
+                       { "general.architecture" => "llama", "llama.expert_count" => 8 },
+                       tensors: [["blk.0.ffn_down_exps.weight", 4096, 23, 4096]])
+      stub_const("Mimic::LlmConfig::BUILTIN_MODEL_DIRS", [root])
+      cfg = { "model" => { "search_paths" => [] }, "llama" => { "engine" => "llama.cpp" } }
+      lib = library(cfg)
+
+      expect(lib.hidden_reason(lib.hidden.first))
+        .to eq("MoE I-quant -- ik_llama.cpp has the kernels and the offload")
+    end
+
+    it "says the dense model was hidden for being dense, not for its packing" do
+      root = Pathname.new(Dir.mktmpdir)
+      GgufWriter.write(root / "dense.gguf", { "general.architecture" => "llama" },
+                       tensors: [["blk.0.attn_q.weight", 4096, 12, 4096]])
+      stub_const("Mimic::LlmConfig::BUILTIN_MODEL_DIRS", [root])
+      cfg = { "model" => { "search_paths" => [] }, "llama" => { "engine" => "ik_llama.cpp" } }
+      lib = library(cfg)
+
+      expect(lib.hidden_reason(lib.hidden.first)).to eq("dense -- llama.cpp serves these faster")
     end
 
     # Sorting the picker's list means reading every model's tensor block,

@@ -24,7 +24,7 @@ module Mimic
 
       def board(client: nil)
         cfg = LlmConfig.load
-        ModelsTable.new(cfg, Model::Library.new(cfg).all, client: client)
+        ModelsTable.new(cfg, Model::Library.new(cfg).chat_loadable_or_hidden, client: client)
       end
     end
   end

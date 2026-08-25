@@ -1,4 +1,5 @@
 require_relative "../ui"
+require_relative "../util/fmt"
 require_relative "base"
 require_relative "wizard/embed"
 require_relative "../llm_config"
@@ -56,10 +57,17 @@ module Mimic
         found = embedding_models(cfg)
         return puts "No embedding models found under #{cfg.search_paths.to_a.join(', ')}" if found.empty?
 
-        found.each do |model|
-          mark = model.path.to_s == cfg.embed.path ? Ui.green("●") : " "
-          puts "#{mark} #{model.path} [#{Engine::LlamaEmbed.mode_for(model.path)}]"
+        rows = found.map do |model|
+          [
+            model.path.to_s == cfg.embed.path ? Ui.green("●") : "",
+            model.model_alias,
+            Engine::LlamaEmbed.mode_for(model.path),
+            Util::Fmt.human_size(model.real.size),
+            model.path.dirname.to_s.sub(/\A#{Regexp.escape(Dir.home)}/, "~"),
+          ]
         end
+        Ui.table(header: ["", "Alias", "Mode", "Size", "Path"], rows: rows)
+        puts "\nSwitch with `llm embed setup` -- active model is marked ●"
       end
 
       private

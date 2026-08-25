@@ -20,6 +20,7 @@ RSpec.describe Mimic::Engine::IkLlama do
     stub_const("Mimic::LlmConfig::MODEL_COMPUTE_PATH", @dir / "model-compute.json")
     stub_const("Mimic::LlmConfig::MODEL_SAMPLING_PATH", @dir / "model-sampling.json")
     stub_const("Mimic::Model::Memory::N_CPU_MOE_PATH", @dir / "ik-n-cpu-moe.json")
+    allow(Mimic::Util::Probes).to receive(:port_free?).and_return(true)
   end
 
   def server_process(log_path)
@@ -55,6 +56,12 @@ RSpec.describe Mimic::Engine::IkLlama do
   end
 
   describe ".retry_blocker" do
+    it "names the port conflict rather than blaming VRAM when the bind failed" do
+      tail = "couldn't bind to server socket: hostname=127.0.0.1 port=8080\n"
+      expect(described_class.retry_blocker(tail, 0))
+        .to eq("port 8080 is still held by another process")
+    end
+
     it "blocks immediately on a non-OOM failure" do
       expect(described_class.retry_blocker("segfault", 0)).to eq("startup failed for a reason other than VRAM")
     end
@@ -153,6 +160,24 @@ RSpec.describe Mimic::Engine::IkLlama do
     end
   end
 
+  describe "#render_preset and the CUDA graph cache" do
+    it "disables CUDA graphs" do
+      allow(Mimic::EngineCli::Registry).to receive(:binaries).and_return([])
+      stub_const("Mimic::Paths::LLM_RUN_DIR", @dir / "run")
+      stub_const("Mimic::Engine::IkLlama::LAUNCH_RECORD", @dir / "run/ik-llama-launch.txt")
+      allow(Mimic::Util::Probes).to receive(:which).and_return(nil)
+      allow(File).to receive(:file?).and_call_original
+      allow(File).to receive(:file?).with("/bin/llama-server").and_return(true)
+      settings = Mimic::LlmConfig::Settings.new(
+        { "model" => { "path" => "/m.gguf" }, "llama" => { "binary" => "/bin/llama-server" } },
+      )
+
+      described_class.new(settings).render_preset
+
+      expect(described_class::LAUNCH_RECORD.read).to include("-cuda graphs=0")
+    end
+  end
+
   describe "#start" do
     def settings_for(mtp: "off", binary: "/bin/llama-server", model: "/m.gguf", model_on_disk: true)
       allow(Mimic::EngineCli::Registry).to receive(:binaries).and_return([])
@@ -163,12 +188,16 @@ RSpec.describe Mimic::Engine::IkLlama do
       allow(File).to receive(:file?).with(binary.to_s).and_return(!binary.nil?)
       allow(File).to receive(:file?).with(model).and_return(model_on_disk)
       Mimic::LlmConfig::Settings.new(
-        { "model" => { "path" => model, "mtp" => mtp }, "llama" => { "binary" => binary.to_s } },
+        { "model" => { "path" => model, "mtp" => mtp },
+          "llama" => { "binary" => binary.to_s, "host" => "127.0.0.1", "port" => 8080 } },
       )
     end
 
     def stub_llama(_settings, running:, spawns: nil)
       allow(Mimic::Util::Probes).to receive(:http_ok).and_return(running)
+      # The preflight budget asks the running server what it holds; unstubbed
+      # that reads the real pid file and shells out to the real nvidia-smi.
+      allow_any_instance_of(Mimic::Engine::ServerProcess).to receive(:gpu_mib).and_return(0)
       return unless spawns
 
       allow(Mimic::Engine::Launcher).to receive(:new)
@@ -198,7 +227,7 @@ RSpec.describe Mimic::Engine::IkLlama do
       settings = settings_for
       stub_llama(settings, running: false, spawns: 4242)
       allow(Mimic::Util::Probes).to receive(:wait_ready).and_return(true)
-      allow(Mimic::Util::Probes).to receive(:descendants).with(4242).and_return([])
+      allow(Mimic::Util::Probes).to receive(:descendants).and_return([])
       settings.model.context_length = 65_536
       settings.llama.cache_type = "q8_0"
       measured = instance_double(Mimic::Model::Footprint, measurable?: true, fits?: true)
@@ -222,6 +251,71 @@ RSpec.describe Mimic::Engine::IkLlama do
       described_class.new(settings).start
 
       expect(described_class::LAUNCH_RECORD.read).to include("--n-cpu-moe 3")
+    end
+
+    # `llm quality` scores every model at one context on a fully resident card,
+    # so its numbers compare engines rather than offload depths. Both the
+    # cached value and the preflight would otherwise put layers on the CPU.
+    describe "n_cpu_moe: as a forced floor" do
+      it "ignores a cached offload the caller has overridden" do
+        settings = settings_for
+        stub_llama(settings, running: false, spawns: 4242)
+        Mimic::Model.new("/m.gguf").memory.remember_n_cpu_moe(8)
+        allow_any_instance_of(Mimic::Model).to receive(:footprint).and_return(
+          instance_double(Mimic::Model::Footprint, measurable?: true, fits?: true, measured_overhead_mib: nil),
+        )
+        allow(Mimic::Util::Probes).to receive(:wait_ready).and_return(true)
+
+        described_class.new(settings).start(remember: false, n_cpu_moe: 0)
+
+        expect(described_class::LAUNCH_RECORD.read).not_to include("--n-cpu-moe")
+      end
+
+      it "ignores a preflight that wants an offload" do
+        settings = settings_for
+        stub_llama(settings, running: false, spawns: 4242)
+        allow_any_instance_of(Mimic::Model).to receive(:footprint).and_return(
+          instance_double(Mimic::Model::Footprint, measurable?: true, fits?: false, layers_to_offload: 6,
+                          measured_overhead_mib: nil),
+        )
+        allow(Mimic::Util::Probes).to receive(:wait_ready).and_return(true)
+        allow_any_instance_of(Mimic::Model::Header).to receive(:block_count).and_return(40)
+
+        described_class.new(settings).start(remember: false, n_cpu_moe: 0)
+
+        expect(described_class::LAUNCH_RECORD.read).not_to include("--n-cpu-moe")
+      end
+
+      # The forced value is not a measurement, and the store is a ratchet the
+      # user's real setup reads -- writing 0 back would silently undo a cached
+      # offload that a 140K run depends on.
+      it "leaves the cached offload untouched rather than lowering it to the forced value" do
+        settings = settings_for
+        stub_llama(settings, running: false, spawns: 4242)
+        Mimic::Model.new("/m.gguf").memory.remember_n_cpu_moe(8)
+        allow_any_instance_of(Mimic::Model).to receive(:footprint).and_return(
+          instance_double(Mimic::Model::Footprint, measurable?: true, fits?: true, measured_overhead_mib: nil),
+        )
+        allow(Mimic::Util::Probes).to receive(:wait_ready).and_return(true)
+
+        described_class.new(settings).start(remember: false, n_cpu_moe: 0)
+
+        expect(Mimic::Model.new("/m.gguf").memory.n_cpu_moe).to eq(8)
+      end
+
+      it "still records what an ordinary start settled on" do
+        settings = settings_for
+        stub_llama(settings, running: false, spawns: 4242)
+        Mimic::Model.new("/m.gguf").memory.remember_n_cpu_moe(3)
+        allow_any_instance_of(Mimic::Model).to receive(:footprint).and_return(
+          instance_double(Mimic::Model::Footprint, measurable?: true, fits?: true, measured_overhead_mib: nil),
+        )
+        allow(Mimic::Util::Probes).to receive(:wait_ready).and_return(true)
+
+        described_class.new(settings).start
+
+        expect(Mimic::Model.new("/m.gguf").memory.n_cpu_moe).to eq(3)
+      end
     end
 
     it "returns an ok Result without launching when already running" do
@@ -253,14 +347,57 @@ RSpec.describe Mimic::Engine::IkLlama do
 
     # Python printed the retry trace on stdout; anything capturing
     # `llm start`'s stdout must still see it.
-    it "prints the MoE offload and MTP notices on stdout, not stderr" do
+    it "prints the MoE offload notice on stdout, not stderr" do
       settings = settings_for(mtp: "on")
       stub_llama(settings, running: false, spawns: 4242)
       Mimic::Model.new("/m.gguf").memory.remember_n_cpu_moe(8)
       allow(Mimic::Util::Probes).to receive(:wait_ready).and_return(true)
 
       expect { described_class.new(settings).start(remember: false) }
-        .to output(/MTP requested but not yet wired.*offloading MoE experts of first 8 layers/m).to_stdout
+        .to output(/offloading MoE experts of first 8 layers/).to_stdout
+    end
+
+    it "drafts with the MTP head when mtp is on" do
+      settings = settings_for(mtp: "on")
+      stub_llama(settings, running: false, spawns: 4242)
+      allow(Mimic::Util::Probes).to receive(:wait_ready).and_return(true)
+
+      described_class.new(settings).start(remember: false)
+
+      expect(described_class::LAUNCH_RECORD.read).to include("--spec-type mtp:n_max=2")
+    end
+
+    it "omits the spec stage when mtp is off" do
+      settings = settings_for(mtp: "off")
+      stub_llama(settings, running: false, spawns: 4242)
+      allow(Mimic::Util::Probes).to receive(:wait_ready).and_return(true)
+
+      described_class.new(settings).start(remember: false)
+
+      expect(described_class::LAUNCH_RECORD.read).not_to include("--spec-type")
+    end
+
+    # ik creates the MTP draft context after the weights and KV are resident,
+    # so the stage can OOM a load that fits without it. The tail carries the
+    # same "out of memory" retry_blocker keys on, and n_expert = 0 would have
+    # it answer "dense, no experts to offload" -- a verdict about the wrong
+    # subsystem. Dropping the draft stage is the repair.
+    it "restarts without speculative decoding when the MTP context cannot fit" do
+      settings = settings_for(mtp: "on")
+      stub_llama(settings, running: false, spawns: 77)
+      log = @dir / "mtp.log"
+      log.write("ggml_backend_cuda_buffer_type_alloc_buffer: cudaMalloc failed: out of memory\n" \
+                "common_speculative_init: failed to create MTP context\n" \
+                "llm_load_print_meta: n_expert         = 0\n")
+      allow(server_process(log)).to receive(:cleanup_failed)
+      allow(Mimic::Util::Probes).to receive(:wait_ready).and_return(false, true)
+
+      result = nil
+      expect { result = described_class.new(settings).start(remember: false) }
+        .to output(/no VRAM left for the MTP draft context/).to_stdout
+
+      expect(result).to be_ok
+      expect(described_class::LAUNCH_RECORD.read).not_to include("--spec-type")
     end
 
     # The auto-tune loop: an OOM that retry_blocker clears means relaunch with

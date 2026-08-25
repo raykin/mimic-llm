@@ -5,8 +5,8 @@ require_relative "../llm_config"
 module Mimic
   class Model
     # What the last good run of one model used: context, measured compute
-    # buffer, sampler values, MoE offload and projector. Five sidecar JSON
-    # files under ~/.llm, each keyed by resolved model path.
+    # buffer, sampler values, MoE offload, engine and projector. One sidecar
+    # JSON file per fact under ~/.llm, each keyed by resolved model path.
     class Memory
       N_CPU_MOE_PATH = Paths::LLM_ROOT / "ik-n-cpu-moe.json"
       TERNARY_PACKING_PATH = Paths::LLM_ROOT / "model-packing.json"
@@ -57,21 +57,21 @@ module Mimic
       def remember_n_cpu_moe(value) = n_cpu_moe_store.write(@path, value)
       def forget_n_cpu_moe = n_cpu_moe_store.delete(@path)
 
-      # The packing lives in the tensor block, which sits behind the vocab
+      # Which engine serves this model best. Unlike the rest of Memory this
+      # is a verdict, not an observation -- llama.engine is one global key, so
+      # a sweep that visits every model has nowhere else to read a per-model
+      # choice from. Absent means nothing has judged this model yet.
+      def engine = engine_store.fetch(@path)
+      def remember_engine(value) = engine_store.write(@path, value)
+      def forget_engine = engine_store.delete(@path)
+
+      # Both facts live in the tensor block, which sits behind the vocab
       # array -- reaching it costs a full KV walk per model, and the setup
-      # picker asks for every model it lists. Cached against size and mtime so
-      # a rebuilt or replaced file is re-read.
-      def ternary_packing
-        stamp = file_stamp
-        return @header.ternary_packing if stamp.nil?
+      # picker asks for every model it lists. Cached together against size and
+      # mtime so a rebuilt or replaced file is re-read.
+      def ternary_packing = tensor_facts["packing"]&.to_sym
 
-        entry = packing_store.fetch(@path)
-        return entry["packing"]&.to_sym if entry && entry.slice("size", "mtime") == stamp
-
-        packing = @header.ternary_packing
-        packing_store.write(@path, stamp.merge("packing" => packing&.to_s))
-        packing
-      end
+      def iquant? = tensor_facts["iquant"] == true
 
       def mmproj = mmproj_store.fetch(@path)
 
@@ -82,6 +82,26 @@ module Mimic
       private
 
       def compute_key(ctx, cache_type) = "#{ctx}:#{cache_type}"
+
+      # An entry written before iquant existed carries no such key, so it is
+      # re-read rather than answered as false.
+      def tensor_facts
+        return @tensor_facts if defined?(@tensor_facts)
+
+        stamp = file_stamp
+        return @tensor_facts = read_tensor_facts if stamp.nil?
+
+        entry = packing_store.fetch(@path)
+        return @tensor_facts = entry if entry && entry.slice("size", "mtime") == stamp && entry.key?("iquant")
+
+        @tensor_facts = read_tensor_facts
+        packing_store.write(@path, stamp.merge(@tensor_facts))
+        @tensor_facts
+      end
+
+      def read_tensor_facts
+        { "packing" => @header.ternary_packing&.to_s, "iquant" => @header.iquant? }
+      end
 
       def file_stamp
         stat = File.stat(@path)
@@ -100,6 +120,7 @@ module Mimic
       def sampling_store = Store.new(LlmConfig::MODEL_SAMPLING_PATH)
       def compute_store = Store.new(LlmConfig::MODEL_COMPUTE_PATH)
       def n_cpu_moe_store = Store.new(N_CPU_MOE_PATH)
+      def engine_store = Store.new(LlmConfig::MODEL_ENGINE_PATH)
       def packing_store = Store.new(TERNARY_PACKING_PATH)
       def mmproj_store = Store.new(LlmConfig::MODEL_MMPROJ_PATH)
     end

@@ -32,7 +32,7 @@ module Mimic
           flags: ["-DLLAMA_CURL=OFF", "-DGGML_SCHED_MAX_COPIES=1"],
           binaries: %i[build path],
         },
-        "prism-llama.cpp" => {
+        "prism-v7-llama.cpp" => {
           url: "https://github.com/PrismML-Eng/llama.cpp.git",
           branch: "prism",
           flags: [],
@@ -43,7 +43,10 @@ module Mimic
       LOCAL_BINARY = Pathname.new(Dir.home) / ".local/bin/llama-server"
 
       class << self
-        def names = ENGINES.keys
+        # Every engine this build offers. Drives the setup wizard's picker, the
+        # `--rollback` enum and the update sweep -- so a dev-only engine is
+        # absent here in an installed gem and present in a checkout.
+        def names = ENGINES.reject { |_, entry| entry[:dev] && !Paths.dev_build? }.keys
 
         def entry(name) = ENGINES.fetch(name, ENGINES.fetch(DEFAULT))
 

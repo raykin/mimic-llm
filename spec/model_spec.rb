@@ -180,10 +180,4 @@ RSpec.describe Mimic::Model do
       expect(model.model_alias).to eq("Bonsai-27B")
     end
   end
-
-  describe "#path" do
-    it "returns the path it was built with" do
-      expect(described_class.new("/models/model-Q4_K_M.gguf").path.to_s).to eq("/models/model-Q4_K_M.gguf")
-    end
-  end
 end

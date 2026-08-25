@@ -63,10 +63,12 @@ module Mimic
     def memory = @memory ||= Memory.new(path, header)
 
     def supports_mtp? = header.supports_mtp?
+    def moe? = header.moe? == true
 
-    def footprint(ctx, cache_type, compute_mib: nil)
-      Footprint.new(header, ctx: ctx, cache_type: cache_type,
-                            weights_bytes: weights_bytes, compute_mib: compute_mib)
+    def footprint(ctx, cache_type, compute_mib: nil, drafting: false, slots: 1, reclaimable_mib: 0)
+      Footprint.new(header, ctx: ctx, cache_type: cache_type, weights_bytes: weights_bytes,
+                            compute_mib: compute_mib, drafting: drafting, slots: slots,
+                            reclaimable_mib: reclaimable_mib)
     end
 
     private

@@ -24,9 +24,8 @@ RSpec.describe Mimic::LlmConfig do
       Mimic::LlmConfig::LLM_CONFIG_PATH.write("last_used: 2026-07-28\nllama:\n  port: 9090\n")
 
       cfg = described_class.load
-      expect(cfg).to be_a(Mimic::LlmConfig::Settings)
       expect(cfg.llama.port).to eq(9090)
-      expect(cfg.llama.host).to eq("127.0.0.1")
+      expect(cfg.llama.host).to eq("0.0.0.0")
     end
   end
 

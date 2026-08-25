@@ -13,6 +13,9 @@ RSpec.describe Mimic::LlmCli::Wizard::ContextPreflight do
   before do
     stub_const("Mimic::LlmConfig::MODEL_COMPUTE_PATH", @dir / "model-compute.json")
     stub_const("Mimic::Model::Memory::N_CPU_MOE_PATH", @dir / "ik-n-cpu-moe.json")
+    # Otherwise this reads the real pid file and the real card.
+    allow(Mimic::Engine::ServerProcess).to receive(:chat)
+      .and_return(instance_double(Mimic::Engine::ServerProcess, gpu_mib: 0))
   end
 
   def preflight(cfg = base_cfg, prompt: instance_double(Mimic::Ui::Prompt))
@@ -49,7 +52,7 @@ RSpec.describe Mimic::LlmCli::Wizard::ContextPreflight do
   it "passes the measured compute cost to the estimate when one was recorded" do
     Mimic::Model.new("/m.gguf").memory.remember_compute(60_000, "q8_0", 1712)
     expect_any_instance_of(Mimic::Model).to receive(:footprint)
-      .with(60_000, "q8_0", compute_mib: 1712)
+      .with(60_000, "q8_0", compute_mib: 1712, slots: 1, reclaimable_mib: 0)
       .and_return(footprint_double(fits?: true, need_mib: 1000.0, total_mib: 24_000, max_ctx: 5000))
 
     expect { preflight.ok? }.to output(/VRAM ok/).to_stdout

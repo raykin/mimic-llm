@@ -18,6 +18,7 @@ module Mimic
     MODEL_MMPROJ_PATH = LLM_CONFIG_DIR / "model-mmproj.json"
     MODEL_COMPUTE_PATH = LLM_CONFIG_DIR / "model-compute.json"
     MODEL_SAMPLING_PATH = LLM_CONFIG_DIR / "model-sampling.json"
+    MODEL_ENGINE_PATH = LLM_CONFIG_DIR / "model-engine.json"
     LEGACY_CONFIG = Paths::STATE_DIR / "llm_config.yaml"
 
     BUILTIN_MODEL_DIRS = [
@@ -36,7 +37,7 @@ module Mimic
       },
       "llama" => {
         "engine" => "llama.cpp",
-        "host" => "127.0.0.1",
+        "host" => "0.0.0.0",
         "port" => 8080,
         "flash_attn" => "on",
         "cache_type" => "q8_0",

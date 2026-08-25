@@ -1,6 +1,7 @@
 require "etc"
 require "pathname"
 require_relative "../paths"
+require_relative "binary_options"
 
 module Mimic
   module EngineCli
@@ -23,24 +24,44 @@ module Mimic
         spec_type: "spec-type",
         spec_draft_n_max: "spec-draft-n-max",
         reasoning: "reasoning",
+        reasoning_effort: "reasoning-effort",
         load_on_startup: "load-on-startup",
       }.freeze
 
-      def initialize(settings, model_alias:, chat_template: nil, mtp: false, mmproj: nil)
+      # `options` is the flag surface of the binary that will read this file.
+      # Nil means write every key unaudited -- the caller could not resolve a
+      # binary, so there is nothing to audit against.
+      def initialize(settings, model_alias:, chat_template: nil, mtp: false, mmproj: nil, options: nil)
         @settings = settings
         @model_alias = model_alias
         @chat_template = chat_template
         @mtp = mtp
         @mmproj = mmproj
+        @options = options
+        @dropped = []
       end
 
+      attr_reader :dropped
+
       def write(path)
+        @dropped = []
+        body = lines.join("\n")
         path.dirname.mkpath
-        path.write("#{lines.join("\n")}\n")
+        path.write("#{body}\n")
         path
       end
 
       private
+
+      # The router refuses to start on an unrecognized key rather than
+      # ignoring it, so a key this build has never heard of is left out --
+      # losing one setting beats losing the server.
+      def keep?(key)
+        return true if @options.nil? || @options.supports?(key)
+
+        @dropped << key
+        false
+      end
 
       # `version` must sit under the global `[*]` section: keys above the
       # first section head become a preset literally named "default"
@@ -54,10 +75,15 @@ module Mimic
       end
 
       def entry_lines
-        entries.filter_map { |key, value| "#{KEYS.fetch(key)} = #{value}" unless value.nil? }
+        entries.filter_map do |key, value|
+          name = KEYS.fetch(key)
+          "#{name} = #{value}" unless value.nil? || !keep?(name)
+        end
       end
 
-      def sampling_lines = @settings.model.sampling.to_h.map { |flag, value| "#{flag} = #{value}" }
+      def sampling_lines
+        @settings.model.sampling.to_h.filter_map { |flag, value| "#{flag} = #{value}" if keep?(flag.to_s) }
+      end
 
       def entries
         {
@@ -80,6 +106,7 @@ module Mimic
           spec_type: ("draft-mtp" if @mtp),
           spec_draft_n_max: (2 if @mtp),
           reasoning: @settings.model.reasoning,
+          reasoning_effort: "medium",
           load_on_startup: "true",
         }
       end

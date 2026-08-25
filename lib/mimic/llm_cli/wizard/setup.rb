@@ -16,23 +16,23 @@ module Mimic
     module Wizard
       class Setup
         CONTEXT_PRESETS = {
-          "60000 / q8_0 -- roomy, fits models 110000 can't" => [60_000, "q8_0"],
-          "80000 / q8_0 -- balanced, fits most 128k models" => [80_000, "q8_0"],
-          "110000 / q8_0 -- near-max all-GPU (~1.5 GB VRAM headroom)" => [110_000, "q8_0"],
-          "120000 / q8_0 -- max q8_0 all-GPU (~1 GB free, desktop-tight)" => [120_000, "q8_0"],
-          "131072 / q8_0 -- fastest, max all-GPU context" => [131_072, "q8_0"],
-          "140000 / q8_0 -- extended ctx (verify it fits)" => [140_000, "q8_0"],
-          "150000 / q8_0 -- extended ctx (verify it fits)" => [150_000, "q8_0"],
-          "160000 / q8_0 -- extended ctx (verify it fits)" => [160_000, "q8_0"],
-          "180000 / q8_0 -- extended ctx (verify it fits)" => [180_000, "q8_0"],
-          "200000 / q8_0 -- extended ctx (verify it fits)" => [200_000, "q8_0"],
-          "262144 / q4_0 -- max context, ~half speed" => [262_144, "q4_0"],
+          "60000 / q8_0" => [60_000, "q8_0"],
+          "80000 / q8_0" => [80_000, "q8_0"],
+          "110000 / q8_0" => [110_000, "q8_0"],
+          "120000 / q8_0" => [120_000, "q8_0"],
+          "131072 / q8_0" => [131_072, "q8_0"],
+          "140000 / q8_0" => [140_000, "q8_0"],
+          "150000 / q8_0" => [150_000, "q8_0"],
+          "160000 / q8_0" => [160_000, "q8_0"],
+          "180000 / q8_0" => [180_000, "q8_0"],
+          "200000 / q8_0" => [200_000, "q8_0"],
+          "262144 / q4_0" => [262_144, "q4_0"],
         }.freeze
 
         ENGINE_BLURBS = {
           "llama.cpp" => "upstream, router-mode preset",
           "ik_llama.cpp" => "ikawrakow fork (IQK quants, fused MoE)",
-          "prism-llama.cpp" => "PrismML fork (Q2_0 ternary Bonsai kernels)",
+          "prism-v7-llama.cpp" => "current Prism fork (Bonsai 2 PQ2_0/PTQ1_0)",
         }.freeze
 
         attr_reader :config
@@ -101,7 +101,9 @@ module Mimic
           remembered = @config.model.file.memory.last_ctx
           if remembered
             @config.model.context_length, @config.llama.cache_type = remembered
-            puts "#{Ui.green('Last good run for this model:')} #{Util::Fmt.commas(remembered[0])} / #{remembered[1]}"
+            unless CONTEXT_PRESETS.value?(remembered)
+              puts "#{Ui.green('Last good run for this model:')} #{Util::Fmt.commas(remembered[0])} / #{remembered[1]}"
+            end
           end
           preflight = ContextPreflight.new(@config, prompt: @prompt)
           loop do
@@ -151,13 +153,10 @@ module Mimic
         def report_hidden_models
           return if library.hidden.empty?
 
-          names = library.hidden.map { |model| model.path.basename.to_s }.join(", ")
-          reason = if @config.llama.engine == "prism-llama.cpp"
-                     "not a Prism G128 ternary model"
-                   else
-                     "ternary weights #{@config.llama.engine} cannot read"
-                   end
-          puts Ui.yellow("hidden -- #{reason}: #{names}")
+          library.hidden.group_by { |model| library.hidden_reason(model) }.each do |reason, models|
+            names = models.map { |model| model.path.basename.to_s }.join(", ")
+            puts Ui.yellow("hidden -- #{reason}: #{names}")
+          end
         end
 
         def model_label(model)
@@ -169,18 +168,26 @@ module Mimic
         end
 
         def pick_context
-          current_preset = CONTEXT_PRESETS.find do |_, (ctx, kv)|
+          presets = labelled_presets
+          current_preset = presets.find do |_, (ctx, kv)|
             ctx == @config.model.context_length && kv == @config.llama.cache_type
           end&.first
-          picked = @prompt.select("Context preset:", [*CONTEXT_PRESETS.keys, "Custom..."], default: current_preset)
+          picked = @prompt.select("Context preset:", [*presets.keys, "Custom..."], default: current_preset)
           if picked == "Custom..."
             context = @prompt.ask("Context length (tokens):", default: @config.model.context_length.to_s)
             @config.model.context_length = Integer(context)
             @config.llama.cache_type = @prompt.select("KV cache type:", %w[q8_0 q4_0 f16], default: @config.llama.cache_type)
           else
-            ctx, kv = CONTEXT_PRESETS.fetch(picked)
+            ctx, kv = presets.fetch(picked)
             @config.model.context_length = ctx
             @config.llama.cache_type = kv
+          end
+        end
+
+        def labelled_presets
+          remembered = @config.model.file.memory.last_ctx
+          CONTEXT_PRESETS.to_h do |label, preset|
+            [preset == remembered ? "#{label} -- last success run" : label, preset]
           end
         end
       end

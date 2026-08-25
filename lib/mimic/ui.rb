@@ -5,6 +5,16 @@ module Mimic
   # Ui::Prompt or calls Ui.banner/panel/table, so swapping the terminal
   # library again is one file rather than every wizard.
   module Ui
+    # cli-ui builds the "Choose with ↑ ↓ ⏎" instruction line inside
+    # ask_interactive and prints it through puts_question, so the one place
+    # to reach it is on the way out. ⏎ renders as an empty box in this
+    # terminal, and Space selects exactly as Return does, so both keys are
+    # named; the arrows render fine and are left alone.
+    module SpelledOutKeys
+      def puts_question(str) = super(str.gsub("⏎", "Enter/Space"))
+    end
+    CLI::UI::Prompt.singleton_class.prepend(SpelledOutKeys)
+
     COLORS = %i[green red yellow cyan gray bold].freeze
 
     class << self

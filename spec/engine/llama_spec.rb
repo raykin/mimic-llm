@@ -114,6 +114,7 @@ RSpec.describe Mimic::Engine::Llama do
       allow(File).to receive(:file?).and_call_original
       allow(File).to receive(:file?).with(binary.to_s).and_return(!binary.nil?)
       allow(File).to receive(:file?).with("/models/foo-Q4_K_M.gguf").and_return(model_on_disk)
+      allow(Mimic::Util::Probes).to receive(:port_free?).and_return(true)
       cfg["llama"]["binary"] = binary.to_s
     end
 
@@ -180,6 +181,7 @@ RSpec.describe Mimic::Engine::Llama do
       expect(launcher).to have_received(:spawn) do |command|
         expect(command.first).to eq("/usr/bin/llama-server")
         expect(command).to include("--models-preset", described_class::PRESET_FILE.to_s)
+        expect(command).to include("--reuse-port")
       end
     end
 
@@ -197,7 +199,7 @@ RSpec.describe Mimic::Engine::Llama do
       measured = instance_double(Mimic::Model::Footprint)
       allow(measured).to receive(:measured_overhead_mib).with(pids: [4242, 4243]).and_return(2431)
       expect_any_instance_of(Mimic::Model).to receive(:footprint)
-        .with(4096, "q8_0", compute_mib: 0).and_return(measured)
+        .with(4096, "q8_0", compute_mib: 0, slots: 1).and_return(measured)
 
       expect(described_class.new(settings).start.ok?).to be true
       expect(Mimic::Model.new("/models/foo-Q4_K_M.gguf").memory.compute_mib(4096, "q8_0")).to eq(2431)

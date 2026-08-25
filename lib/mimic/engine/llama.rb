@@ -10,7 +10,7 @@ module Mimic
       # preset's own keys re-dashed into the flags the router expands them to
       # in /v1/models. Only the three observed there are listed -- notably no
       # n_cpu_moe, which is how `llm status` knows to leave the line off.
-      ARG_FLAGS = %i[ctx cache_type n_slots mmproj reasoning].to_h { |key| [key, "--#{EngineCli::LlamaPreset::KEYS.fetch(key)}"] }.freeze
+      ARG_FLAGS = %i[ctx cache_type n_slots mmproj reasoning reasoning_effort].to_h { |key| [key, "--#{EngineCli::LlamaPreset::KEYS.fetch(key)}"] }.freeze
 
       # argv of the actually-running instance, straight from the router's own
       # /v1/models -- config.yaml can be stale (e.g. `llm parallel` overrides
@@ -25,8 +25,12 @@ module Mimic
 
       def render_preset
         ensure_chat_template
-        EngineCli::LlamaPreset.new(@settings, model_alias: model_alias, chat_template: chat_template_override,
-                                              mtp: mtp_enabled?, mmproj: @settings.model.mmproj_path).write(PRESET_FILE)
+        preset = EngineCli::LlamaPreset.new(@settings, model_alias: model_alias, chat_template: chat_template_override,
+                                                       mtp: mtp_enabled?, mmproj: @settings.model.mmproj_path,
+                                                       options: binary_options)
+        preset.write(PRESET_FILE)
+        report_dropped(preset.dropped)
+        PRESET_FILE
       end
 
       def start(remember: true)
@@ -37,6 +41,7 @@ module Mimic
 
         missing = model_missing
         return Result.error(missing) if missing
+        return port_busy_error("llama-server") unless await_port_release
 
         render_preset
         log_offset = process.log_size
@@ -72,8 +77,21 @@ module Mimic
 
       private
 
+      def binary_options
+        binary = find_binary
+        binary && EngineCli::BinaryOptions.new(binary)
+      end
+
+      def report_dropped(dropped)
+        return if dropped.empty?
+
+        puts "[preset] #{@settings.llama.engine} does not carry " \
+             "#{dropped.map { |name| "--#{name}" }.join(', ')} -- left out of the preset"
+      end
+
       def build_command(binary)
-        [binary, "--models-preset", PRESET_FILE.to_s, "--host", @settings.llama.host, "--port", @settings.llama.port.to_s, "--metrics"]
+        [binary, "--models-preset", PRESET_FILE.to_s, "--host", @settings.llama.host,
+         "--port", @settings.llama.port.to_s, "--reuse-port", "--metrics"]
       end
 
       def model_loaded?

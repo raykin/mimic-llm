@@ -13,11 +13,19 @@ module Mimic
       # packs 64 weights into an 18-byte block, PrismML's fork 128 into 34, and
       # neither reads the other's file -- under the same type id, so only the
       # measured bytes-per-weight tells them apart. Ids above what any engine
-      # here defines (Prism's original 142) are readable by none of them.
+      # here defines are rejected unless they are current Prism ternary types.
       TERNARY_TYPE = 42
-      MAX_KNOWN_TYPE = 42
+      PRISM_TYPES = { 142 => :pq2, 143 => :ptq1 }.freeze
+      MAX_COMMON_TYPE = 42
       G128_BYTES_PER_WEIGHT = 34 / 128.0
       G64_BYTES_PER_WEIGHT = 18 / 64.0
+
+      # Mainline llama.cpp's I-quants. ik_llama.cpp carries a dedicated CPU
+      # GEMM for exactly this family (iqk_gemm_iquants.cpp) plus interleaved
+      # _R4/_R8 repacks of it, which is why the pairing with MoE offload is
+      # ik's alone. ik's own IQx_K ids are absent on purpose: mainline cannot
+      # load those at all, so there is no engine choice left to make.
+      IQUANT_TYPES = [16, 17, 18, 19, 20, 21, 22, 23, 29].freeze
 
       # Architectures that only ever ship as encoders. A decoder-shaped
       # embedding model (Qwen3-Embedding and friends) keeps its chat
@@ -55,13 +63,31 @@ module Mimic
       def pooling_type = arch_value { |meta, arch| meta["#{arch}.pooling_type"] }
       def block_count = arch_value { |meta, arch| meta["#{arch}.block_count"] }
 
+      # How many of block_count's blocks are MTP draft heads rather than
+      # transformer layers. Counted out of the KV estimate unless the engine
+      # is actually drafting, and counted back in when it is -- a nextn block
+      # carries its own full attention.
+      def nextn_layers = arch_value { |meta, arch| meta["#{arch}.nextn_predict_layers"] } || 0
+
       # Which engine's ternary packing this model carries: :g128 (PrismML
-      # fork), :g64 (mainline llama.cpp), :unsupported (a private type no
-      # engine here defines), or nil when the model is not ternary.
+      # v5 fork), :g64 (mainline llama.cpp), :pq2 or :ptq1 (current Prism
+      # fork), :unsupported (an unknown or mixed private type), or nil.
       def ternary_packing
         return @ternary_packing if defined?(@ternary_packing)
 
         @ternary_packing = read_ternary_packing
+      end
+
+      # Whether the weights are predominantly a mainline I-quant. Judged on
+      # share of tensor bytes, not on any single tensor: a dynamic quant
+      # ("UD-IQ4_XS") mixes types per layer and its widest tensor is always
+      # the Q8_0/Q5_K token_embd or output, so the widest one names the file
+      # wrongly every time. Measured here: UD-IQ4_NL is 80% IQ by bytes,
+      # UD-IQ4_XS 68%, both behind a non-IQ widest tensor.
+      def iquant?
+        return @iquant if defined?(@iquant)
+
+        @iquant = read_iquant
       end
 
       # Average bytes of expert weights per MoE layer -- what moving one
@@ -89,7 +115,10 @@ module Mimic
       def read_ternary_packing
         tensors = @gguf.tensors
         return nil if tensors.empty?
-        return :unsupported if tensors.any? { |tensor| tensor[:type] > MAX_KNOWN_TYPE }
+        return :unsupported if tensors.any? { |tensor| tensor[:type] > MAX_COMMON_TYPE && !PRISM_TYPES.key?(tensor[:type]) }
+        prism_packings = tensors.filter_map { |tensor| PRISM_TYPES[tensor[:type]] }.uniq
+        return :unsupported if prism_packings.size > 1
+        return prism_packings.first unless prism_packings.empty?
 
         ternary = tensors.select { |tensor| tensor[:type] == TERNARY_TYPE }
         return nil if ternary.empty?
@@ -103,6 +132,22 @@ module Mimic
         (per_weight - G128_BYTES_PER_WEIGHT).abs < (per_weight - G64_BYTES_PER_WEIGHT).abs ? :g128 : :g64
       rescue Errno::ENOENT, ArgumentError, EOFError
         nil
+      end
+
+      def read_iquant
+        sizes = @gguf.tensor_sizes
+        total = 0
+        iquant = 0
+        @gguf.tensors.each do |tensor|
+          bytes = sizes.fetch(tensor[:name])
+          total += bytes
+          iquant += bytes if IQUANT_TYPES.include?(tensor[:type])
+        end
+        return false if total.zero?
+
+        iquant * 2 > total
+      rescue Errno::ENOENT, ArgumentError, EOFError, KeyError
+        false
       end
 
       def read_expert_bytes_per_layer

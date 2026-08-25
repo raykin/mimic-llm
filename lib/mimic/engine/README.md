@@ -42,8 +42,8 @@ an upstream fork that takes the same flags — no new class.
 
 A new row needs a `binaries:` list, ordered. `:path` is `llama-server` on PATH,
 `:build` is the engine's own checkout, `:local` is `~/.local/bin`. An engine
-that omits `:path` cannot borrow another build; that is how prism-llama.cpp,
-whose ternary weights no upstream build reads, stays isolated.
+that omits `:path` cannot borrow another build; Prism stays isolated because
+its ternary formats need its own fork.
 
 Write a class only when the launch protocol differs — different argv, different
 readiness check, a retry loop. Then it is `Engine::Whatever < Base` and
@@ -70,11 +70,11 @@ It is `ServerProcess`, not `Process`: a class named `Process` inside `Engine`
 shadows core `Process` for every file in the namespace, and `Launcher`'s
 `Process.spawn` resolves to it.
 
-## Why prism-llama.cpp has no class
+## Why the Prism engine has no class
 
 It used to be `class PrismLlama < Llama` overriding exactly `find_binary`. A
 subclass that overrides one method and adds no state is configuration wearing a
-type. It is now three symbols in the registry row.
+type. Prism uses a registry row.
 
 Rails does the same with MariaDB — no `MariaDBAdapter`, just a `mariadb?`
 predicate on the shared abstract adapter. If a fork ever needs behaviour rather

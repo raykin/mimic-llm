@@ -15,6 +15,12 @@ module Mimic
 
       MANAGED_KEYS = /\s*(oss_provider|model_provider|model|model_context_window)\s*=/
 
+      # Codex's 300000 ms default counts the whole byte-less period, and llama-server
+      # sends nothing while it processes the prompt. Its reconnect lands on another
+      # parallel slot that shares no KV prefix, so the retries restart prefill from
+      # zero and never converge. 20 minutes clears a slow CPU-MoE first turn.
+      STREAM_IDLE_TIMEOUT_MS = 1_200_000
+
       def initialize(settings)
         @settings = settings
       end
@@ -58,7 +64,8 @@ module Mimic
           "base_url = #{JSON.generate("#{base}/v1")}\n" \
           "env_key = \"#{ENV_KEY}\"\n" \
           "wire_api = \"responses\"\n" \
-          "requires_openai_auth = false\n"
+          "requires_openai_auth = false\n" \
+          "stream_idle_timeout_ms = #{STREAM_IDLE_TIMEOUT_MS}\n"
       end
 
       def supports_model_catalog?

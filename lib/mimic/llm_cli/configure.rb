@@ -15,7 +15,8 @@ module Mimic
         "model.temperature" => ["Temperature", :float],
         "model.top_p" => ["top_p", :float],
         "model.top_k" => ["top_k", :int],
-        "llama.engine" => ["Inference engine (llama.cpp/ik_llama.cpp/prism-llama.cpp)", :str],
+        "llama.engine" => ["Inference engine (#{EngineCli::Registry.names.join('/')})", :str],
+        "llama.host" => ["Bind address (0.0.0.0 lets containers reach it; 127.0.0.1 is host-only)", :str],
         "llama.port" => ["llama.cpp port", :int],
         "llama.n_slots" => ["Number of llama.cpp slots (1 for local use)", :int],
       }.freeze

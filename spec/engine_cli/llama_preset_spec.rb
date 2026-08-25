@@ -97,4 +97,48 @@ RSpec.describe Mimic::EngineCli::LlamaPreset do
     expect(preset.write(target)).to eq(target)
     expect(target).to exist
   end
+
+  describe "auditing against the binary's flag surface" do
+    # PrismML's fork has no --reasoning-effort, and the router rejects the
+    # whole preset file over one key it does not recognize, taking the model
+    # with it.
+    let(:without_reasoning_effort) do
+      instance_double(Mimic::EngineCli::BinaryOptions).tap do |options|
+        allow(options).to receive(:supports?) { |name| name != "reasoning-effort" }
+      end
+    end
+
+    def audited
+      described_class.new(Mimic::LlmConfig::Settings.new(cfg), model_alias: "foo",
+                                                               options: without_reasoning_effort)
+    end
+
+    it "leaves out a key the binary does not carry" do
+      preset = audited
+      text = preset.write(@dir / "llama-models.ini").read
+
+      expect(text).not_to include("reasoning-effort")
+      expect(text).to include("reasoning = auto", "model = /m.gguf")
+      expect(preset.dropped).to eq(["reasoning-effort"])
+    end
+
+    it "audits the sampler keys too" do
+      options = instance_double(Mimic::EngineCli::BinaryOptions)
+      allow(options).to receive(:supports?) { |name| name != "top-k" }
+      preset = described_class.new(Mimic::LlmConfig::Settings.new(cfg), model_alias: "foo", options: options)
+
+      text = preset.write(@dir / "llama-models.ini").read
+
+      expect(text).not_to include("top-k")
+      expect(text).to include("temp = 0.8")
+      expect(preset.dropped).to eq(["top-k"])
+    end
+
+    it "writes every key when there is no binary to audit against" do
+      preset = described_class.new(Mimic::LlmConfig::Settings.new(cfg), model_alias: "foo")
+
+      expect(preset.write(@dir / "llama-models.ini").read).to include("reasoning-effort = medium")
+      expect(preset.dropped).to be_empty
+    end
+  end
 end

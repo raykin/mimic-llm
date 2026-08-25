@@ -104,6 +104,19 @@ RSpec.describe Mimic::Engine::ChatTemplate do
       expect(build(QWEN_PREAMBLE).sanitized).to include("{{- item.text if item.text is defined else '' }}")
     end
 
+    # Qwen3.8-27B ships ten guards; three are about tool-call argument shapes
+    # mimic has no opinion on. All-or-nothing threw away the system-message
+    # repair over those three and left the server 500ing on every Claude Code
+    # <system-reminder>.
+    it "repairs the guards it knows and leaves the rest standing" do
+      template = "#{QWEN_PREAMBLE}{%- if bad %}{{- raise_exception('Tool call is missing a function name.') }}{%- endif %}"
+
+      sanitized = build(template).sanitized
+
+      expect(sanitized).to include("{{- '<|im_start|>system\\n' + content + '<|im_end|>' + '\\n' }}")
+      expect(sanitized).to include("raise_exception('Tool call is missing a function name.')")
+    end
+
     it "refuses a guard message no rule covers" do
       template = "{%- if x %}{{- raise_exception('Some brand new guard.') }}{%- endif %}"
       expect(build(template).sanitized).to be_nil

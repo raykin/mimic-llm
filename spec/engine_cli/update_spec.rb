@@ -22,7 +22,7 @@ RSpec.describe Mimic::EngineCli::Update do
     allow(Mimic::EngineCli::Source).to receive(:status).with("llama.cpp").and_return(status("llama.cpp", behind: 0))
     allow(Mimic::EngineCli::Source).to receive(:status).with("ik_llama.cpp")
       .and_return(status("ik_llama.cpp", behind: 28, subject_line: "Compiler warning"))
-    allow(Mimic::EngineCli::Source).to receive(:status).with("prism-llama.cpp").and_return(nil)
+    allow(Mimic::EngineCli::Source).to receive(:status).with("prism-v7-llama.cpp").and_return(nil)
     allow(Mimic::EngineCli::Source).to receive(:build_command).with("ik_llama.cpp").and_return("cd /tmp/ik_llama.cpp && cmake --build build")
     allow(updater).to receive(:system).and_return(true)
   end
@@ -46,6 +46,19 @@ RSpec.describe Mimic::EngineCli::Update do
   it "runs the rebuild command for each pending engine, once each" do
     updater.run
     expect(updater).to have_received(:system).with("cd /tmp/ik_llama.cpp && cmake --build build").once
+  end
+
+  it "updates all three registered engines when each checkout is behind" do
+    Mimic::EngineCli::Registry.names.each do |name|
+      allow(Mimic::EngineCli::Source).to receive(:status).with(name).and_return(status(name, behind: 1))
+      allow(Mimic::EngineCli::Source).to receive(:build_command).with(name).and_return("build #{name}")
+    end
+
+    updater.run
+
+    Mimic::EngineCli::Registry.names.each do |name|
+      expect(updater).to have_received(:system).with("build #{name}").once
+    end
   end
 
   it "reports which engines failed to build" do

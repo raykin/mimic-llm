@@ -33,6 +33,32 @@ RSpec.describe Mimic::Model::Gguf do
       expect(meta).not_to have_key("general.tags")
     end
 
+    it "keeps a per-layer numeric array" do
+      path = @dir / "per_layer.gguf"
+      GgufWriter.write(path, {
+                         "general.architecture" => "gemma4",
+                         "gemma4.attention.head_count_kv" => [16, 16, 4],
+                         "gemma4.block_count" => 3,
+                       })
+
+      meta = described_class.new(path).metadata
+      expect(meta["gemma4.attention.head_count_kv"]).to eq([16, 16, 4])
+      expect(meta["gemma4.block_count"]).to eq(3)
+    end
+
+    it "skips a vocab-sized numeric array and keeps reading later keys" do
+      path = @dir / "token_types.gguf"
+      GgufWriter.write(path, {
+                         "general.architecture" => "llama",
+                         "tokenizer.ggml.token_type" => Array.new(described_class::BIG_SCALAR_ARRAY + 1, 1),
+                         "llama.block_count" => 32,
+                       })
+
+      meta = described_class.new(path).metadata
+      expect(meta).not_to have_key("tokenizer.ggml.token_type")
+      expect(meta["llama.block_count"]).to eq(32)
+    end
+
     it "stops at a vocab-sized string array once the architecture block is read" do
       path = @dir / "vocab.gguf"
       GgufWriter.write(path, {

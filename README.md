@@ -5,41 +5,52 @@ Code or Codex against it, so a local model answers instead of a hosted one.
 
 ## Requirements
 
-- **Linux.** `mimic` aborts on anything else.
-- **Ruby 3.2+.**
-- **A GGUF model file.** Nothing here downloads models.
-- **`git`, `cmake`, `cc`, `c++`** -- only if you let `llm setup` build the
-  inference engine. Not needed when `llama-server` is already on `PATH`.
-- **CUDA toolkit or ROCm**, for a GPU build. The backend is detected: `nvcc`
-  gives `-DGGML_CUDA=on`, `/dev/kfd` or `rocminfo` gives `-DGGML_HIP=on`,
-  neither gives a CPU-only build. `nvidia-smi` alone is not enough.
-- **`claude` or `codex` on `PATH`**, for the launcher you intend to use.
+- **Linux**, **Ruby 3.2+**, and an NVIDIA or AMD GPU.
+- **`claude` or `codex`** installed, for the launcher you want.
+- Everything else -- the inference engine included -- `llm setup` handles.
 
-## Installation
+## From nothing to a local Claude Code
 
     gem install mimic-llm
 
-Installs `llm` and `mimic`. A third executable, `lllm`, is the same program
-as `llm` under a name that stays reachable when something else already owns
-`llm` on your `PATH` -- the python `llm` CLI, most often.
+Get one GGUF model file. This is the only step `llm` cannot do for you; it
+downloads nothing. Any `.gguf` works, and unsloth publishes ready ones:
 
-## Getting started
+    pip install huggingface_hub
+    hf download unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF \
+      --include "*UD-Q4_K_XL*" --local-dir ~/models
+
+Then:
 
     llm setup
-    llm start
+
+It checks the box (RAM, disk, GPU backend, whether `llama-server` and `claude`
+are already there), asks which engine to use, and **clones and builds it when no
+binary exists** -- a CUDA build takes 10-30 minutes and needs `git`, `cmake`,
+`cc`, `c++`. It then scans for GGUFs, and offers to type a path when it finds
+none. Point it at `~/models`, or register the directory once with
+`llm path add ~/models` so later runs list it.
+
+The remaining steps pick a context length and whether the model thinks before
+answering. Context is checked against your card's free VRAM before it is
+accepted, so an oversized choice is rejected at the prompt rather than at a
+failed launch. Settings land in `~/.llm/config.yaml`, and setup offers to start
+the server.
+
+    llm status
+
+Confirms the server is up, on `http://127.0.0.1:8080` by default, and prints
+what it loaded. Then:
+
     mimic claude
 
-`llm setup` walks through engine, model, context preset and reasoning, then
-writes `~/.llm/config.yaml` and offers to start the server. It scans
-`~/hf-models` and `~/.lmstudio/models` for GGUF files; register other
-directories with `llm path add DIR`. When no `llama-server` is found it offers
-to clone the chosen engine into `~/.llm/<engine>` and build it there, or exits
-with that engine's own build guide.
+Claude Code, answered by your own model. `mimic codex` does the same for Codex.
 
-`mimic claude` requires llama-server to be up already, and says so rather than
-failing at the first request. `llm sync` reporting "no SWE agent configs found"
-is the expected result when no other agent is installed -- Claude Code is
-configured by `mimic claude` itself, against a config dir of its own.
+To change anything later: `llm setup` again, or `llm config` for one value,
+then `llm restart`.
+
+If something else already owns `llm` on your `PATH` (the python `llm` CLI, most
+often), the gem installs `lllm` as the same program under a free name.
 
 ## State it owns
 
@@ -119,8 +130,11 @@ runnable on its own — nothing in the example above ships with this gem.
 ## Development
 
 ```
-bundle install && bundle exec rspec
+bundle install && bundle exec rspec < /dev/null
 ```
+
+The `< /dev/null` is required: one spec exercises cli-ui's prompt layer, which
+opens Reline against the terminal and blocks forever when stdin is a tty.
 
 To run a checkout instead of the installed gem, symlink `exe/llm` and
 `exe/mimic` onto your `PATH` -- they run under plain `ruby`, so the gem
@@ -129,3 +143,29 @@ dependencies have to be on the default gem path.
 The suite runs under `spec/support/real_llm_root_guard.rb`, which raises on any
 write or delete under `~/.llm`, `~/.mimic`, `/tmp/llm` or a client config tree.
 Point a `stub_const` at a tmpdir instead.
+
+## Trademarks
+
+Not affiliated with, endorsed by, or sponsored by Anthropic, OpenAI or unsloth.
+"Claude", "Claude Code", "Codex" and "OpenAI" are trademarks of their respective
+owners, used here only to describe what this tool interoperates with.
+
+This project ships neither client. `mimic` launches `claude` or `codex` if you
+have installed them yourself, and configures them through their own documented
+settings -- `ANTHROPIC_BASE_URL` for Claude Code, `model_providers` for Codex.
+No Anthropic or OpenAI credential is used or required; `Agent::Claude` unsets
+`ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` before launching. Your use of
+either client remains governed by its own license and terms.
+
+Design credit: the Claude Code and Codex launch recipes are reimplementations of
+[unsloth](https://github.com/unslothai/unsloth)'s `unsloth_cli/start.py`. What
+was taken and what was deliberately left is recorded in `UPSTREAM-REVIEW.md`.
+The Codex provider block mimic writes still carries unsloth's own profile name
+(`unsloth_api`) and auth env var, so an existing `~/.codex/config.toml` keeps
+working.
+
+## License
+
+MIT -- see [LICENSE](LICENSE). One bundled file is not MIT:
+`lib/mimic/agent/codex_fallback_prompt.md` is a verbatim Apache-2.0 copy of the
+Codex CLI system prompt, carried from unsloth. See [NOTICE](NOTICE).

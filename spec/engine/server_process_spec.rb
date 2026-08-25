@@ -44,6 +44,17 @@ RSpec.describe Mimic::Engine::ServerProcess do
       expect(tail).not_to include("prelude")
     end
 
+    # Regression: the offset is a byte count from `log_size`, so decoding the
+    # log before slicing turned it into a character index. One multi-byte
+    # character was enough to push the offset past the end of a long log, and
+    # a failed launch reported its log path with no lines from it.
+    it "reads from a byte offset even when earlier lines are multi-byte" do
+      prelude = "prelude ✓\n"
+      (@dir / "server.log").write("#{prelude}the decisive error line\n")
+
+      expect(process.log_tail(prelude.bytesize)).to eq("the decisive error line\n")
+    end
+
     it "is empty when the log is missing" do
       expect(process.log_tail).to eq("")
     end
@@ -86,6 +97,34 @@ RSpec.describe Mimic::Engine::ServerProcess do
       allow(Mimic::Util::Probes).to receive(:read_pid).and_return(nil)
 
       expect(process.pids).to eq([])
+    end
+  end
+
+  describe "#gpu_mib" do
+    # What `llm setup` has to add back to the free-VRAM figure: this server is
+    # holding the model the new context replaces.
+    it "is the VRAM held by the recorded pid and its descendants" do
+      allow(Mimic::Util::Probes).to receive(:read_pid).and_return(500)
+      allow(Mimic::Util::Probes).to receive(:descendants).with(500).and_return([501])
+      allow(Mimic::Util::Host).to receive(:gpu_process_mib).with([500, 501]).and_return(13_388)
+
+      expect(process.gpu_mib).to eq(13_388)
+    end
+
+    it "is zero when no server is running" do
+      allow(Mimic::Util::Probes).to receive(:read_pid).and_return(nil)
+
+      expect(process.gpu_mib).to eq(0)
+    end
+
+    # nvidia-smi answering nothing is not the same as a server holding
+    # nothing, but budgeting as if it held nothing is the conservative half.
+    it "is zero when the card cannot be read" do
+      allow(Mimic::Util::Probes).to receive(:read_pid).and_return(500)
+      allow(Mimic::Util::Probes).to receive(:descendants).and_return([])
+      allow(Mimic::Util::Host).to receive(:gpu_process_mib).and_return(nil)
+
+      expect(process.gpu_mib).to eq(0)
     end
   end
 

@@ -11,4 +11,15 @@ RSpec.describe "gem package contents" do
   it "ships the licence and the attribution for the vendored prompt" do
     expect(files).to include("LICENSE", "NOTICE", "README.md")
   end
+
+  # `llm debug` and `llm quality` drive harnesses that live in the stack repo
+  # and ship nowhere -- packaged, they would advertise commands that cannot
+  # work on an installed gem.
+  it "leaves the development-only commands out of the package" do
+    expect(files.grep(%r{\Alib/mimic/llm_cli/dev/})).to be_empty
+  end
+
+  it "still ships the command file that decides whether to register them" do
+    expect(files).to include("lib/mimic/llm_cli/root.rb")
+  end
 end

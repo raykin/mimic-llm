@@ -53,11 +53,18 @@ RSpec.describe Mimic::LlmCli::Wizard::Setup do
     end
 
     it "defaults to the configured engine" do
-      prompt = engine_prompt("prism-llama.cpp")
-      config = wizard({ "model" => {}, "llama" => { "engine" => "prism-llama.cpp" } }, prompt: prompt).choose_engine
+      prompt = engine_prompt("prism-v7-llama.cpp")
+      config = wizard({ "model" => {}, "llama" => { "engine" => "prism-v7-llama.cpp" } }, prompt: prompt).choose_engine
 
       expect(@default).to eq(3)
-      expect(config).to eq("prism-llama.cpp")
+      expect(config).to eq("prism-v7-llama.cpp")
+    end
+
+    it "offers the current Prism fork for Bonsai 2" do
+      prompt = engine_prompt("prism-v7-llama.cpp")
+      config = wizard({ "model" => {}, "llama" => {} }, prompt: prompt).choose_engine
+
+      expect(@choices.find { |choice| choice[:value] == config }[:name]).to include("Bonsai 2 PQ2_0/PTQ1_0")
     end
   end
 
@@ -68,6 +75,8 @@ RSpec.describe Mimic::LlmCli::Wizard::Setup do
                        tensors: [["blk.0.attn_q.weight", 4096, 12, 4096]])
       GgufWriter.write(root / "bonsai-g128.gguf", { "general.architecture" => "qwen35" },
                        tensors: [["blk.0.attn_q.weight", 34_000, 42, 128_000]])
+      GgufWriter.write(root / "bonsai-2-pq2.gguf", { "general.architecture" => "qwen35" },
+                       tensors: [["blk.0.attn_q.weight", 34_000, 142, 128_000]])
       root
     end
 
@@ -85,12 +94,12 @@ RSpec.describe Mimic::LlmCli::Wizard::Setup do
     it "explains a plain GGUF hidden from prism as not-Prism-exclusive, not unreadable" do
       root = models_dir
       stub_const("Mimic::LlmConfig::BUILTIN_MODEL_DIRS", [root])
-      cfg = { "model" => { "search_paths" => [] }, "llama" => { "engine" => "prism-llama.cpp" } }
+      cfg = { "model" => { "search_paths" => [] }, "llama" => { "engine" => "prism-v7-llama.cpp" } }
       prompt = instance_double(Mimic::Ui::Prompt)
-      allow(prompt).to receive(:select).and_return((root / "bonsai-g128.gguf").to_s)
+      allow(prompt).to receive(:select).and_return((root / "bonsai-2-pq2.gguf").to_s)
 
       expect { wizard(cfg, prompt: prompt).choose_model }
-        .to output(/hidden -- not a Prism G128 ternary model.*plain\.gguf/).to_stdout
+        .to output(/hidden -- not a Prism Bonsai 2 ternary model.*plain\.gguf/).to_stdout
     end
   end
 
@@ -256,6 +265,10 @@ RSpec.describe Mimic::LlmCli::Wizard::Setup do
       end
     end
 
+    it "labels presets with ctx and KV type alone" do
+      expect(described_class::CONTEXT_PRESETS.keys).to all(match(/\A\d+ \/ \w+\z/))
+    end
+
     it "keeps the preset the preflight accepted" do
       allow_any_instance_of(Mimic::LlmCli::Wizard::ContextPreflight).to receive(:ok?).and_return(true)
 
@@ -274,13 +287,54 @@ RSpec.describe Mimic::LlmCli::Wizard::Setup do
       expect(prompt).to have_received(:select).twice
     end
 
-    it "starts from the last good run for this model" do
-      Mimic::Model.new("/m.gguf").memory.remember_ctx(80_000, "q4_0")
+    it "marks the preset matching the last good run" do
+      Mimic::Model.new("/m.gguf").memory.remember_ctx(110_000, "q8_0")
       allow_any_instance_of(Mimic::LlmCli::Wizard::ContextPreflight).to receive(:ok?).and_return(true)
       prompt = picking_prompt
 
-      expect { wizard(cfg, prompt: prompt).choose_context }
+      expect { wizard(cfg, prompt: prompt).choose_context }.to output.to_stdout
+
+      expect(prompt).to have_received(:select)
+        .with("Context preset:", array_including("110000 / q8_0 -- last success run"), any_args)
+    end
+
+    it "leaves every other preset unmarked" do
+      Mimic::Model.new("/m.gguf").memory.remember_ctx(110_000, "q8_0")
+      allow_any_instance_of(Mimic::LlmCli::Wizard::ContextPreflight).to receive(:ok?).and_return(true)
+      prompt = picking_prompt
+
+      expect { wizard(cfg, prompt: prompt).choose_context }.to output.to_stdout
+
+      expect(prompt).to have_received(:select) do |_, choices, _|
+        expect(choices.grep(/last success run/).size).to eq(1)
+      end
+    end
+
+    it "marks nothing when the model has no remembered run" do
+      allow_any_instance_of(Mimic::LlmCli::Wizard::ContextPreflight).to receive(:ok?).and_return(true)
+      prompt = picking_prompt
+
+      expect { wizard(cfg, prompt: prompt).choose_context }.to output.to_stdout
+
+      expect(prompt).to have_received(:select) do |_, choices, _|
+        expect(choices.grep(/last success run/)).to be_empty
+      end
+    end
+
+    it "falls back to a printed line when no preset matches the last good run" do
+      Mimic::Model.new("/m.gguf").memory.remember_ctx(80_000, "q4_0")
+      allow_any_instance_of(Mimic::LlmCli::Wizard::ContextPreflight).to receive(:ok?).and_return(true)
+
+      expect { wizard(cfg, prompt: picking_prompt).choose_context }
         .to output(/Last good run for this model: 80,000 \/ q4_0/).to_stdout
+    end
+
+    it "prints no fallback line when a preset carries the marker" do
+      Mimic::Model.new("/m.gguf").memory.remember_ctx(110_000, "q8_0")
+      allow_any_instance_of(Mimic::LlmCli::Wizard::ContextPreflight).to receive(:ok?).and_return(true)
+
+      expect { wizard(cfg, prompt: picking_prompt).choose_context }
+        .not_to output(/Last good run for this model/).to_stdout
     end
   end
 

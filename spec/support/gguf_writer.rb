@@ -3,6 +3,7 @@
 # STRING (8) and UINT32 (4), matching what the real header carries for the
 # keys Model::Header and Model::Footprint care about.
 module GgufWriter
+  INT32 = 5
   UINT32 = 4
   FLOAT32 = 6
   STRING = 8
@@ -10,6 +11,8 @@ module GgufWriter
 
   # A string array value: `GgufWriter.write(path, "tokenizer.ggml.tokens" => StringArray.new(%w[a b]))`
   StringArray = Struct.new(:entries)
+
+  # A per-layer numeric array: `GgufWriter.write(path, "gemma4.attention.head_count_kv" => [16, 4])`
 
   module_function
 
@@ -30,6 +33,11 @@ module GgufWriter
           f.write([STRING].pack("L<"))
           f.write([value.entries.size].pack("Q<"))
           value.entries.each { |e| write_string(f, e) }
+        elsif value.is_a?(Array)
+          f.write([ARRAY].pack("L<"))
+          f.write([INT32].pack("L<"))
+          f.write([value.size].pack("Q<"))
+          f.write(value.pack("l<*"))
         elsif value.is_a?(String)
           f.write([STRING].pack("L<"))
           write_string(f, value)

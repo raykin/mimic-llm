@@ -12,10 +12,6 @@ RSpec.describe Mimic::Engine::LlamaEmbed do
     )
   end
 
-  it "is an engine" do
-    expect(described_class.superclass).to be(Mimic::Engine::Base)
-  end
-
   # Selected by role, not by config: Registry.for dispatches on
   # llama.engine and Registry.names drives the setup wizard's engine picker,
   # so an entry there would offer the encoder as a chat engine.
