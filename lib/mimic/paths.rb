@@ -16,6 +16,10 @@ module Mimic
     # launchers pass one to the server when the file exists and ignore the
     # directory otherwise.
     CHAT_TEMPLATES_DIR = LLM_ROOT / "chat-templates"
+    # Sanitized copies mimic writes itself, kept apart from the
+    # hand-maintained ones so a regenerated file can never clobber a
+    # decision the user made.
+    GENERATED_TEMPLATES_DIR = CHAT_TEMPLATES_DIR / "generated"
     PID_DIR = Pathname.new("/tmp/llm")
 
     STATE_DIR = Pathname.new(Dir.home) / ".mimic"

@@ -2,7 +2,7 @@ require "json"
 require "pathname"
 require "open3"
 require_relative "../paths"
-require_relative "../probes"
+require_relative "../util/probes"
 
 module Mimic
   module Agent
@@ -20,12 +20,12 @@ module Mimic
       end
 
       def launch(extra_args)
-        if Probes.which("codex").nil? && !ENV["MIMIC_ALLOW_INSTALL"]
+        if Util::Probes.which("codex").nil? && !ENV["MIMIC_ALLOW_INSTALL"]
           abort "codex binary not found -- install it with `npm install -g @openai/codex`"
         end
 
         entry = model_entry
-        base = @settings.base_url
+        base = @settings.llama.base_url
         seed_home
         write_config(base, entry)
         launch_env = { ENV_KEY => Agent::AUTH_TOKEN, "CODEX_HOME" => home.to_s }
@@ -37,7 +37,7 @@ module Mimic
       private
 
       def model_entry
-        { "id" => @settings.model_alias, "context_length" => @settings.context_length }
+        { "id" => @settings.model.name, "context_length" => @settings.model.context_length }
       end
 
       def merge_config(existing, base)
@@ -62,7 +62,7 @@ module Mimic
       end
 
       def supports_model_catalog?
-        executable = Probes.which("codex")
+        executable = Util::Probes.which("codex")
         return true if executable.nil?
 
         out, status = Open3.capture2(executable, "--version")

@@ -1,0 +1,7 @@
+require_relative "engine"
+require_relative "engine_cli/registry"
+require_relative "engine_cli/llama_preset"
+require_relative "engine_cli/source"
+require_relative "engine_cli/builder"
+require_relative "engine_cli/update"
+require_relative "engine_cli/status"

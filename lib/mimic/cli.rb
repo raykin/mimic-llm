@@ -1,25 +1,23 @@
-require "pastel"
-require "tty-prompt"
-require_relative "config"
-require_relative "wizard"
+require_relative "ui"
+require_relative "llm_config"
+require_relative "engine"
 require_relative "health"
-require_relative "services/hermes"
-require_relative "services/llama"
+require_relative "agent/hermes"
 
 module Mimic
   module Cli
     # mimic/claude/codex/hermes-lcc all take a REMAINDER of pass-through
     # args after the subcommand name, which Thor's own flag parser would
     # otherwise try (and fail) to interpret -- dispatch manually instead.
-    COMMANDS = %w[verify hermes-lcc claude codex].freeze
+    COMMANDS = %w[verify install-hermes hermes-lcc claude codex].freeze
 
     class << self
       def menu
-        prompt = TTY::Prompt.new
+        prompt = Ui::Prompt.new
         picked = prompt.select("mimic-llm:", MENU.map(&:first))
         handler = MENU.to_h.fetch(picked)
         handler.call([])
-      rescue TTY::Reader::InputInterrupt
+      rescue Interrupt
         nil
       end
 
@@ -31,6 +29,7 @@ module Mimic
         extra = argv[1..] || []
         case command
         when "verify" then cmd_verify(extra)
+        when "install-hermes" then cmd_install_hermes(extra)
         when "hermes-lcc" then cmd_hermes_lcc(extra)
         when "claude" then cmd_claude(extra)
         when "codex" then cmd_codex(extra)
@@ -45,7 +44,7 @@ module Mimic
       def cmd_hermes_lcc(extra)
         cfg = require_config
         require_llama_running!(cfg, "`mimic hermes-lcc`")
-        Services::Hermes.launch(cfg, extra)
+        Agent::Hermes.launch(cfg, extra)
       end
 
       def cmd_claude(extra)
@@ -67,30 +66,35 @@ module Mimic
         raise SystemExit, 1 unless Health.run(require_config)
       end
 
-      private
+      def cmd_install_hermes(_extra)
+        binary = Agent::Hermes.find_binary
+        return puts "#{Ui.green('hermes found:')} #{binary}" if binary
 
-      def pastel
-        @pastel ||= Pastel.new
+        unless Ui::Prompt.new.yes?("hermes-agent not found. Install into an isolated venv?", default: true)
+          return puts Ui.yellow("Skipping Hermes -- `mimic hermes-lcc` will not work.")
+        end
+
+        puts "#{Ui.green('hermes installed:')} #{Agent::Hermes.install}"
       end
+
+      private
 
       def require_linux!
         abort "mimic-llm supports Linux only" unless RUBY_PLATFORM.include?("linux")
       end
 
       def require_config
-        unless Config.exists?
-          puts pastel.yellow("No config yet -- running setup wizard first.")
-          return Wizard.run(Config.load)
-        end
-        Config.load
+        abort "no LLM config yet -- run `llm setup` first" unless LlmConfig.exists?
+
+        LlmConfig.load
       end
 
       # Check that llama-server is running; fail with a clear message if not.
       def require_llama_running!(cfg, context)
-        return if Services::Llama.new(cfg).running?
+        return if Engine::Llama.new(cfg).running?
 
-        puts "#{pastel.red("#{context} requires llama-server to be running.")}\n" \
-             "  Run `#{pastel.cyan('llm start')}` first."
+        puts "#{Ui.red("#{context} requires llama-server to be running.")}\n" \
+             "  Run `#{Ui.cyan('llm start')}` first."
         raise SystemExit, 1
       end
 
@@ -101,10 +105,11 @@ module Mimic
           Local Hermes + Claude Code stack
 
           commands:
-            verify        check installs, running services and recent errors
-            hermes-lcc    Hermes -> claude-code skill -> Claude Code -> llama.cpp
-            claude        Claude Code -> llama.cpp via Unsloth's start recipe
-            codex         Codex -> llama.cpp via Unsloth's config recipe
+            verify         check installs, running services and recent errors
+            install-hermes install hermes-agent into ~/.hermes/venv
+            hermes-lcc     Hermes -> claude-code skill -> Claude Code -> llama.cpp
+            claude         Claude Code -> llama.cpp via Unsloth's start recipe
+            codex          Codex -> llama.cpp via Unsloth's config recipe
 
           (no command)    interactive menu
         HELP
@@ -116,6 +121,7 @@ module Mimic
       ["Launch Claude Code -- direct to llama.cpp (Unsloth start recipe)", method(:cmd_claude)],
       ["Launch Codex -- direct to llama.cpp (Unsloth config recipe)", method(:cmd_codex)],
       ["Verify stack (installs, services, errors)", method(:cmd_verify)],
+      ["Install hermes-agent into an isolated venv", method(:cmd_install_hermes)],
     ].freeze
   end
 end

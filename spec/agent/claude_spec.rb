@@ -3,9 +3,15 @@ require_relative "../../lib/mimic/agent"
 require "tmpdir"
 
 RSpec.describe Mimic::Agent::Claude do
-  let(:settings) do
-    instance_double(Mimic::LlmConfig::Settings, model_alias: "my-model", context_length: 8192, base_url: "http://x")
+  def settings_double(context_length)
+    instance_double(
+      Mimic::LlmConfig::Settings,
+      model: instance_double(Mimic::LlmConfig::ModelSettings, name: "my-model", context_length: context_length),
+      llama: instance_double(Mimic::LlmConfig::LlamaSettings, base_url: "http://x"),
+    )
   end
+
+  let(:settings) { settings_double(8192) }
   subject(:agent) { described_class.new(settings) }
 
   describe "#launch" do
@@ -81,8 +87,7 @@ RSpec.describe Mimic::Agent::Claude do
     end
 
     it "omits the auto-compact window when context length is nil" do
-      nil_settings = instance_double(Mimic::LlmConfig::Settings, model_alias: "my-model", context_length: nil,
-                                                                   base_url: "http://x")
+      nil_settings = settings_double(nil)
       agent = described_class.new(nil_settings)
       allow(described_class).to receive(:find_binary).and_return(nil)
       allow(agent).to receive(:extra_env).and_return({})
@@ -90,6 +95,13 @@ RSpec.describe Mimic::Agent::Claude do
       env = agent.env
 
       expect(env).not_to have_key("CLAUDE_CODE_AUTO_COMPACT_WINDOW")
+    end
+
+    it "disables the comment gate, whose judge call would evict the served model's prompt cache" do
+      allow(described_class).to receive(:find_binary).and_return(nil)
+      allow(described_class).to receive(:ensure_config_dir).and_return(Pathname.new("/tmp/claude-config"))
+
+      expect(agent.env["COMMENT_GATE_OFF"]).to eq("1")
     end
 
     it "adds the c4ai server to an empty seed" do

@@ -12,11 +12,10 @@ Gem::Specification.new do |spec|
   spec.require_paths = ["lib"]
 
   spec.add_dependency "thor", "~> 1.4"
-  spec.add_dependency "tty-prompt", "~> 0.23"
-  spec.add_dependency "pastel", "~> 0.8"
-  spec.add_dependency "tty-table", "~> 0.12"
-  spec.add_dependency "tty-box", "~> 0.7"
-  spec.add_dependency "sqlite3", "~> 2.0"
+  spec.add_dependency "cli-ui", "~> 2.7"
+  # cli-ui's prompt requires reline/readline, which stopped being default gems
+  # in Ruby 4.0 -- without this the whole prompt layer fails to load.
+  spec.add_dependency "reline", "~> 0.6"
 
   spec.add_development_dependency "rspec", "~> 3.13"
 end

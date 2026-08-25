@@ -3,9 +3,15 @@ require_relative "../../lib/mimic/agent"
 require "tmpdir"
 
 RSpec.describe Mimic::Agent::Codex do
-  let(:settings) do
-    instance_double(Mimic::LlmConfig::Settings, model_alias: "m", context_length: 4096, base_url: "http://x")
+  def settings_double(context_length)
+    instance_double(
+      Mimic::LlmConfig::Settings,
+      model: instance_double(Mimic::LlmConfig::ModelSettings, name: "m", context_length: context_length),
+      llama: instance_double(Mimic::LlmConfig::LlamaSettings, base_url: "http://x"),
+    )
   end
+
+  let(:settings) { settings_double(4096) }
   subject(:agent) { described_class.new(settings) }
   let(:home) { @agents_dir / "codex" }
 
@@ -22,14 +28,14 @@ RSpec.describe Mimic::Agent::Codex do
   before do
     stub_const("Mimic::Paths::AGENTS_DIR", @agents_dir)
     allow(Dir).to receive(:home).and_return(@user_home.to_s)
-    allow(Mimic::Probes).to receive(:which).with("codex").and_return("/usr/bin/codex")
+    allow(Mimic::Util::Probes).to receive(:which).with("codex").and_return("/usr/bin/codex")
     allow(Open3).to receive(:capture2).and_return(["0.120.0\n", instance_double(Process::Status, success?: true)])
     allow(Mimic::Agent).to receive(:spawn_and_wait).and_return(0)
   end
 
   describe "#launch" do
     it "aborts when codex isn't installed and install isn't allowed" do
-      allow(Mimic::Probes).to receive(:which).with("codex").and_return(nil)
+      allow(Mimic::Util::Probes).to receive(:which).with("codex").and_return(nil)
       expect do
         expect { agent.launch([]) }
           .to raise_error(SystemExit) { |e| expect(e.status).to eq(1) }
@@ -97,8 +103,7 @@ RSpec.describe Mimic::Agent::Codex do
     end
 
     it "omits model catalog context window fields when context_length is nil" do
-      nil_settings = instance_double(Mimic::LlmConfig::Settings, model_alias: "m", context_length: nil,
-                                                                   base_url: "http://x")
+      nil_settings = settings_double(nil)
 
       described_class.new(nil_settings).launch([])
 

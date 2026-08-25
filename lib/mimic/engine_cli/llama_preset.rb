@@ -1,0 +1,88 @@
+require "etc"
+require "pathname"
+require_relative "../paths"
+
+module Mimic
+  module EngineCli
+    class LlamaPreset
+      # Preset keys are llama.cpp's long flag names without the dashes, so the
+      # same table names an entry here and, re-dashed, the flag the router
+      # reports it back as in /v1/models -- see Llama::ARG_FLAGS.
+      KEYS = {
+        model: "model",
+        ctx: "ctx-size",
+        n_gpu_layers: "n-gpu-layers",
+        flash_attn: "flash-attn",
+        ubatch: "ubatch-size",
+        cache_type: "cache-type-k",
+        cache_type_v: "cache-type-v",
+        threads: "threads",
+        n_slots: "parallel",
+        chat_template: "chat-template-file",
+        mmproj: "mmproj",
+        spec_type: "spec-type",
+        spec_draft_n_max: "spec-draft-n-max",
+        reasoning: "reasoning",
+        load_on_startup: "load-on-startup",
+      }.freeze
+
+      def initialize(settings, model_alias:, chat_template: nil, mtp: false, mmproj: nil)
+        @settings = settings
+        @model_alias = model_alias
+        @chat_template = chat_template
+        @mtp = mtp
+        @mmproj = mmproj
+      end
+
+      def write(path)
+        path.dirname.mkpath
+        path.write("#{lines.join("\n")}\n")
+        path
+      end
+
+      private
+
+      # `version` must sit under the global `[*]` section: keys above the
+      # first section head become a preset literally named "default"
+      # (preset.cpp maps the empty section name to
+      # COMMON_PRESET_DEFAULT_NAME), and since the parser then skips
+      # `version` that preset carries no model. The router advertises it
+      # in /v1/models and, when a client picks it, spawns a model-less
+      # child that never finishes loading.
+      def lines
+        ["[*]", "version = 1", "", "[#{@model_alias}]"] + entry_lines + sampling_lines
+      end
+
+      def entry_lines
+        entries.filter_map { |key, value| "#{KEYS.fetch(key)} = #{value}" unless value.nil? }
+      end
+
+      def sampling_lines = @settings.model.sampling.to_h.map { |flag, value| "#{flag} = #{value}" }
+
+      def entries
+        {
+          model: @settings.model.path,
+          ctx: @settings.model.context_length,
+          # All-GPU or nothing. Without this llama.cpp auto-fit silently
+          # moves tensors to CPU to make an oversized ctx boot, and the
+          # resulting PCIe traffic per ubatch costs more than the run is
+          # worth. ik is the engine for deliberate CPU-MoE offload; here a
+          # model that doesn't fit should fail at load.
+          n_gpu_layers: 999,
+          flash_attn: @settings.llama.flash_attn,
+          ubatch: 1024,
+          cache_type: @settings.llama.cache_type,
+          cache_type_v: @settings.llama.cache_type,
+          threads: Etc.nprocessors || 4,
+          n_slots: @settings.llama.n_slots,
+          chat_template: @chat_template,
+          mmproj: @mmproj,
+          spec_type: ("draft-mtp" if @mtp),
+          spec_draft_n_max: (2 if @mtp),
+          reasoning: @settings.model.reasoning,
+          load_on_startup: "true",
+        }
+      end
+    end
+  end
+end

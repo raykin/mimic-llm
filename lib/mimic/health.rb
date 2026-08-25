@@ -1,7 +1,6 @@
+require_relative "ui"
 require "time"
-require "pastel"
-require "tty-table"
-require_relative "config"
+require_relative "agent/hermes"
 require_relative "health/checks"
 
 module Mimic
@@ -13,15 +12,15 @@ module Mimic
       def count_recent_errors(minutes: 60)
         counts = { warn: 0, error: 0 }
         cutoff = Time.now - (minutes * 60)
-        [Config::AGENT_LOG, Config::ERRORS_LOG].each { |logpath| tally_log(logpath, counts, cutoff) }
+        [Agent::Hermes::AGENT_LOG, Agent::Hermes::ERRORS_LOG].each { |logpath| tally_log(logpath, counts, cutoff) }
         counts
       end
 
       # Grab last N ERROR lines from errors.log.
       def recent_error_sample(n: 3)
-        return [] unless Config::ERRORS_LOG.exist?
+        return [] unless Agent::Hermes::ERRORS_LOG.exist?
 
-        lines = read_lines(Config::ERRORS_LOG) || []
+        lines = read_lines(Agent::Hermes::ERRORS_LOG) || []
         lines.select { |line| line.include?(" ERROR ") }.last(n)
       end
 
@@ -30,18 +29,13 @@ module Mimic
         checks = Checks.new(settings).to_a
         errs = count_recent_errors
 
-        puts report_table(checks, errs).render(:unicode, multiline: false, width: 200)
+        Ui.table(header: ["Component", "Status", "Detail"], rows: report_rows(checks, errs))
         print_error_sample if errs[:error].positive?
 
         checks.all? { |_, result| result.ok? } && errs[:error].zero?
       end
 
       private
-
-      def pastel
-        @pastel ||= Pastel.new
-      end
-
       def tally_log(logpath, counts, cutoff)
         return unless logpath.exist?
 
@@ -67,17 +61,16 @@ module Mimic
         nil
       end
 
-      def report_table(checks, errs)
+      def report_rows(checks, errs)
         rows = checks.map do |name, result|
-          [name, result.ok? ? pastel.green("OK") : pastel.red("FAIL"), result.message]
+          [name, result.ok? ? Ui.green("OK") : Ui.red("FAIL"), result.message]
         end
         err_label = errs[:error].zero? ? "OK" : "#{errs[:error]} errors, #{errs[:warn]} warns"
-        rows << ["Errors (60m)", errs[:error].zero? ? pastel.green("OK") : pastel.red("ISSUES"), err_label]
-        TTY::Table.new(header: ["Component", "Status", "Detail"], rows: rows)
+        rows << ["Errors (60m)", errs[:error].zero? ? Ui.green("OK") : Ui.red("ISSUES"), err_label]
       end
 
       def print_error_sample
-        puts "\n#{pastel.bold.red('Recent errors:')}"
+        puts "\n#{Ui.bold_red('Recent errors:')}"
         recent_error_sample.each do |line|
           short = line.length > 200 ? "#{line[0, 200]}..." : line
           puts "  #{short}"

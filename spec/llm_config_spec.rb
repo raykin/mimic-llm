@@ -3,58 +3,8 @@ require "tmpdir"
 require "fileutils"
 
 RSpec.describe Mimic::LlmConfig do
-  describe "the model-ctx store" do
-    # Finding A, decided 2026-07-28 in Python's favour: the store is keyed by
-    # the resolved model path, so a model reached through ~/hf-models and the
-    # same model reached at its .lmstudio target share one entry.
-    around do |example|
-      Dir.mktmpdir do |dir|
-        @dir = Pathname.new(dir)
-        (@dir / "store").mkpath
-        FileUtils.touch(@dir / "store/model.gguf")
-        (@dir / "alias.gguf").make_symlink(@dir / "store/model.gguf")
-        example.run
-      end
-    end
-
-    before do
-      stub_const("Mimic::LlmConfig::LLM_CONFIG_DIR", @dir / ".llm")
-      stub_const("Mimic::LlmConfig::MODEL_CTX_PATH", @dir / ".llm/model-ctx.json")
-    end
-
-    def cfg_for(path)
-      {
-        "model" => { "path" => path.to_s, "context_length" => 4096 },
-        "llama" => { "cache_type" => "q8_0" },
-      }
-    end
-
-    it "keys by the symlink target, so either path recalls the same entry" do
-      described_class::Settings.new(cfg_for(@dir / "alias.gguf")).remember_ctx
-
-      written = JSON.parse(Mimic::LlmConfig::MODEL_CTX_PATH.read)
-      expect(written.keys).to eq([(@dir / "store/model.gguf").realpath.to_s])
-      expect(described_class.recall_ctx((@dir / "alias.gguf").to_s)).to eq([4096, "q8_0"])
-      expect(described_class.recall_ctx((@dir / "store/model.gguf").to_s)).to eq([4096, "q8_0"])
-    end
-
-    # Reading and relocating the store are internal steps of remember_ctx /
-    # recall_ctx; nothing outside this module may reach for them.
-    it "keeps the store reader and the legacy relocation off the public surface" do
-      expect { described_class.load_ctx_store }.to raise_error(NoMethodError)
-      expect { described_class.migrate_legacy }.to raise_error(NoMethodError)
-    end
-
-    it "recalls nothing for a path that does not exist" do
-      expect(described_class.recall_ctx((@dir / "gone.gguf").to_s)).to be_nil
-    end
-
-    it "recalls nothing instead of raising when the store is unreadable" do
-      described_class::Settings.new(cfg_for(@dir / "alias.gguf")).remember_ctx
-      Mimic::LlmConfig::MODEL_CTX_PATH.chmod(0o000)
-
-      expect(described_class.recall_ctx((@dir / "alias.gguf").to_s)).to be_nil
-    end
+  it "keeps the legacy relocation off the public surface" do
+    expect { described_class.migrate_legacy }.to raise_error(NoMethodError)
   end
 
   describe ".load" do
@@ -75,8 +25,103 @@ RSpec.describe Mimic::LlmConfig do
 
       cfg = described_class.load
       expect(cfg).to be_a(Mimic::LlmConfig::Settings)
-      expect(cfg.port).to eq(9090)
-      expect(cfg.host).to eq("127.0.0.1")
+      expect(cfg.llama.port).to eq(9090)
+      expect(cfg.llama.host).to eq("127.0.0.1")
+    end
+  end
+
+  # model.mmproj_path and a flat llama.binary both predate the per-model /
+  # per-engine stores that replaced them. Neither is read any more, so a
+  # config written before the split silently loses its projector and hands
+  # whichever engine is configured the other one's binary unless load
+  # relocates both.
+  describe ".load migrating a pre-store config" do
+    around do |example|
+      Dir.mktmpdir do |dir|
+        @dir = Pathname.new(dir)
+        %w[vision.gguf mmproj-vision.gguf].each { |name| FileUtils.touch(@dir / name) }
+        example.run
+      end
+    end
+
+    before do
+      stub_const("Mimic::LlmConfig::LLM_CONFIG_DIR", @dir)
+      stub_const("Mimic::LlmConfig::LLM_CONFIG_PATH", @dir / "config.yaml")
+      stub_const("Mimic::LlmConfig::MODEL_MMPROJ_PATH", @dir / "model-mmproj.json")
+      stub_const("Mimic::LlmConfig::LEGACY_CONFIG", @dir / "absent.yaml")
+    end
+
+    def write_config(model:, llama: {})
+      Mimic::LlmConfig::LLM_CONFIG_PATH.write(Psych.dump("model" => model, "llama" => llama))
+    end
+
+    it "moves a flat mmproj_path into the per-model store and drops the key" do
+      write_config(model: { "path" => (@dir / "vision.gguf").to_s,
+                            "mmproj_path" => (@dir / "mmproj-vision.gguf").to_s })
+
+      expect(described_class.load.model.mmproj_path).to eq((@dir / "mmproj-vision.gguf").to_s)
+      expect(Psych.safe_load(Mimic::LlmConfig::LLM_CONFIG_PATH.read)["model"]).not_to have_key("mmproj_path")
+    end
+
+    it "drops an empty mmproj_path key without storing an entry" do
+      write_config(model: { "path" => (@dir / "vision.gguf").to_s, "mmproj_path" => nil })
+
+      expect(described_class.load.model.mmproj_path).to be_nil
+      expect(Psych.safe_load(Mimic::LlmConfig::LLM_CONFIG_PATH.read)["model"]).not_to have_key("mmproj_path")
+      expect(Mimic::LlmConfig::MODEL_MMPROJ_PATH).not_to exist
+    end
+
+    it "attributes a flat binary string to the engine that was configured with it" do
+      write_config(model: {}, llama: { "engine" => "ik_llama.cpp", "binary" => "/opt/ik/llama-server" })
+
+      expect(described_class.load.llama.binary).to eq("/opt/ik/llama-server")
+      expect(Psych.safe_load(Mimic::LlmConfig::LLM_CONFIG_PATH.read)["llama"]["binary"])
+        .to eq("ik_llama.cpp" => "/opt/ik/llama-server")
+    end
+
+    it "leaves the other engine's binary unset rather than sharing the migrated one" do
+      write_config(model: {}, llama: { "engine" => "ik_llama.cpp", "binary" => "/opt/ik/llama-server" })
+
+      cfg = described_class.load
+      cfg.llama.engine = "llama.cpp"
+      expect(cfg.llama.binary).to eq("")
+    end
+
+    it "drops the sampler keys, which the model's own header now answers for" do
+      write_config(model: { "path" => (@dir / "vision.gguf").to_s, "temperature" => 0.6,
+                            "top_p" => 0.95, "top_k" => 20, "min_p" => 0.0,
+                            "presence_penalty" => 1.5, "repeat_penalty" => 1.0 })
+
+      described_class.load
+      stored = Psych.safe_load(Mimic::LlmConfig::LLM_CONFIG_PATH.read)["model"]
+      expect(stored.keys).not_to include(*Mimic::LlmConfig::Sampling::KEYS)
+    end
+
+    # The choice used to be a boolean spelled `thinking`, translated to the
+    # engines' value at read time. It is stored as that value now, so a
+    # config written before the rename has to be translated once, on disk.
+    it "translates a legacy thinking flag into the reasoning value" do
+      write_config(model: { "path" => (@dir / "vision.gguf").to_s, "thinking" => false })
+
+      expect(described_class.load.model.reasoning).to eq("off")
+      stored = Psych.safe_load(Mimic::LlmConfig::LLM_CONFIG_PATH.read)["model"]
+      expect(stored).to include("reasoning" => "off")
+      expect(stored).not_to have_key("thinking")
+    end
+
+    it "translates a thinking flag that was left on" do
+      write_config(model: { "path" => (@dir / "vision.gguf").to_s, "thinking" => true })
+
+      expect(described_class.load.model.reasoning).to eq("auto")
+      expect(Psych.safe_load(Mimic::LlmConfig::LLM_CONFIG_PATH.read)["model"]).not_to have_key("thinking")
+    end
+
+    it "rewrites nothing when there is nothing to migrate" do
+      write_config(model: { "path" => (@dir / "vision.gguf").to_s }, llama: { "binary" => {} })
+      before_mtime = Mimic::LlmConfig::LLM_CONFIG_PATH.mtime
+
+      described_class.load
+      expect(Mimic::LlmConfig::LLM_CONFIG_PATH.mtime).to eq(before_mtime)
     end
   end
 
@@ -88,18 +133,28 @@ RSpec.describe Mimic::LlmConfig do
       end
     end
 
-    before { stub_const("Mimic::LlmConfig::LLM_CONFIG_PATH", @dir / "config.yaml") }
+    # save mkpaths the directory as well as writing the file, so stubbing the
+    # path alone leaves the real ~/.llm being created by the suite.
+    before do
+      stub_const("Mimic::LlmConfig::LLM_CONFIG_DIR", @dir)
+      stub_const("Mimic::LlmConfig::LLM_CONFIG_PATH", @dir / "config.yaml")
+    end
 
     it "writes the wrapped config" do
       described_class::Settings.new({ "llama" => { "port" => 9090 } }).save
       expect(Psych.safe_load(Mimic::LlmConfig::LLM_CONFIG_PATH.read)).to eq("llama" => { "port" => 9090 })
     end
 
-    # config.yaml is the model + llama profile and nothing else; the mimic
-    # wizard already sliced on the way out, and both wizards now agree.
-    it "writes only the model and llama sections" do
+    # config.yaml is the model + llama + embed profile and nothing else; the
+    # mimic wizard already sliced on the way out, and both wizards now agree.
+    it "writes only the model, llama and embed sections" do
       described_class::Settings.new({ "llama" => { "port" => 9090 }, "stray" => 1 }).save
       expect(Psych.safe_load(Mimic::LlmConfig::LLM_CONFIG_PATH.read).keys).to eq(["llama"])
+    end
+
+    it "keeps the embed section" do
+      described_class::Settings.new({ "embed" => { "port" => 8081 }, "stray" => 1 }).save
+      expect(Psych.safe_load(Mimic::LlmConfig::LLM_CONFIG_PATH.read).keys).to eq(["embed"])
     end
   end
 
@@ -110,98 +165,6 @@ RSpec.describe Mimic::LlmConfig do
       merged = described_class.merge(base, override)
       expect(merged).to eq({ "a" => { "x" => 1, "y" => 99 } })
       expect(base).to eq({ "a" => { "x" => 1, "y" => 2 } })
-    end
-  end
-end
-
-RSpec.describe Mimic::LlmConfig::Settings, "model search paths" do
-  let(:builtin) { [Pathname.new("/opt/a"), Pathname.new("/opt/b")] }
-
-  before { stub_const("Mimic::LlmConfig::BUILTIN_MODEL_DIRS", builtin) }
-
-  def settings_with(paths) = described_class.new({ "model" => { "search_paths" => paths } })
-
-  describe "#search_paths" do
-    it "returns the builtin dirs when nothing is configured" do
-      expect(settings_with([]).search_paths).to eq(builtin)
-    end
-
-    it "tolerates a config with no model block at all" do
-      expect(described_class.new({}).search_paths).to eq(builtin)
-    end
-
-    it "appends configured dirs after the builtins" do
-      expect(settings_with(["/mnt/models"]).search_paths)
-        .to eq(builtin + [Pathname.new("/mnt/models")])
-    end
-
-    it "expands ~ in a configured dir" do
-      expect(settings_with(["~/extra"]).search_paths.last)
-        .to eq(Pathname.new(Dir.home) / "extra")
-    end
-
-    it "drops a configured dir that duplicates a builtin" do
-      expect(settings_with(["/opt/a"]).search_paths).to eq(builtin)
-    end
-  end
-
-  describe "#add_search_path" do
-    it "adds an unknown dir and reports it" do
-      settings = settings_with([])
-      expect(settings.add_search_path("/mnt/models")).to eq(:added)
-      expect(settings.to_h["model"]["search_paths"]).to eq(["/mnt/models"])
-    end
-
-    it "stores the expanded path, not the literal ~" do
-      settings = settings_with([])
-      settings.add_search_path("~/extra")
-      expect(settings.to_h["model"]["search_paths"]).to eq([(Pathname.new(Dir.home) / "extra").to_s])
-    end
-
-    it "reports a builtin dir as already searched and does not store it" do
-      settings = settings_with([])
-      expect(settings.add_search_path("/opt/a")).to eq(:builtin)
-      expect(settings.to_h["model"]["search_paths"]).to eq([])
-    end
-
-    it "reports a duplicate without adding it twice" do
-      settings = settings_with(["/mnt/models"])
-      expect(settings.add_search_path("/mnt/models")).to eq(:duplicate)
-      expect(settings.to_h["model"]["search_paths"]).to eq(["/mnt/models"])
-    end
-
-    it "adds a model block to a config that has none" do
-      settings = described_class.new({})
-      expect(settings.add_search_path("/mnt/models")).to eq(:added)
-      expect(settings.to_h["model"]["search_paths"]).to eq(["/mnt/models"])
-    end
-  end
-
-  describe "#remove_search_path" do
-    it "removes a configured dir" do
-      settings = settings_with(["/mnt/models"])
-      expect(settings.remove_search_path("/mnt/models")).to eq(:removed)
-      expect(settings.to_h["model"]["search_paths"]).to eq([])
-    end
-
-    it "matches an unexpanded ~ against the stored absolute path" do
-      settings = settings_with([(Pathname.new(Dir.home) / "extra").to_s])
-      expect(settings.remove_search_path("~/extra")).to eq(:removed)
-      expect(settings.to_h["model"]["search_paths"]).to eq([])
-    end
-
-    it "reports a builtin dir as not removable" do
-      expect(settings_with([]).remove_search_path("/opt/a")).to eq(:builtin)
-    end
-
-    it "reports an unknown dir" do
-      expect(settings_with([]).remove_search_path("/nope")).to eq(:missing)
-    end
-
-    it "leaves the stored list untouched when nothing matched" do
-      settings = settings_with(["/mnt/models"])
-      settings.remove_search_path("/nope")
-      expect(settings.to_h["model"]["search_paths"]).to eq(["/mnt/models"])
     end
   end
 end

@@ -11,8 +11,8 @@ RSpec.describe Mimic::Health do
   end
 
   before do
-    stub_const("Mimic::Config::AGENT_LOG", @dir / "agent.log")
-    stub_const("Mimic::Config::ERRORS_LOG", @dir / "errors.log")
+    stub_const("Mimic::Agent::Hermes::AGENT_LOG", @dir / "agent.log")
+    stub_const("Mimic::Agent::Hermes::ERRORS_LOG", @dir / "errors.log")
   end
 
   def stamp(minutes_ago) = (Time.now - (minutes_ago * 60)).strftime("%Y-%m-%d %H:%M:%S")

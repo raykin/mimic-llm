@@ -12,12 +12,12 @@ RSpec.describe Mimic::Cli do
 
   describe ".menu" do
     it "dispatches to the handler for the picked label" do
-      allow(Mimic::Config).to receive(:exists?).and_return(true)
-      allow(Mimic::Config).to receive(:load).and_return({})
+      allow(Mimic::LlmConfig).to receive(:exists?).and_return(true)
+      allow(Mimic::LlmConfig).to receive(:load).and_return({})
       allow(Mimic::Health).to receive(:run).and_return(true)
       verify_label = described_class::MENU.find { |_label, handler| handler.name == :cmd_verify }.first
-      prompt = instance_double(TTY::Prompt, select: verify_label)
-      allow(TTY::Prompt).to receive(:new).and_return(prompt)
+      prompt = instance_double(Mimic::Ui::Prompt, select: verify_label)
+      allow(Mimic::Ui::Prompt).to receive(:new).and_return(prompt)
 
       described_class.menu
 
@@ -25,9 +25,9 @@ RSpec.describe Mimic::Cli do
     end
 
     it "returns nil instead of raising when the prompt is interrupted" do
-      prompt = instance_double(TTY::Prompt)
-      allow(TTY::Prompt).to receive(:new).and_return(prompt)
-      allow(prompt).to receive(:select).and_raise(TTY::Reader::InputInterrupt)
+      prompt = instance_double(Mimic::Ui::Prompt)
+      allow(Mimic::Ui::Prompt).to receive(:new).and_return(prompt)
+      allow(prompt).to receive(:select).and_raise(Interrupt)
 
       expect(described_class.menu).to be_nil
     end

@@ -1,0 +1,149 @@
+require_relative "../../lib/mimic"
+require_relative "../../lib/mimic/engine/llama_embed"
+require_relative "../support/gguf_writer"
+require "tmpdir"
+
+RSpec.describe Mimic::Engine::LlamaEmbed do
+  def settings(embed: {}, llama: {})
+    Mimic::LlmConfig::Settings.new(
+      "model" => { "path" => "/models/chat-Q4_K_M.gguf" },
+      "llama" => { "host" => "0.0.0.0", "port" => 8080, "binary" => { "llama.cpp" => "/bin/llama-server" } }.merge(llama),
+      "embed" => { "path" => "/models/bge-m3-Q8_0.gguf" }.merge(embed),
+    )
+  end
+
+  it "is an engine" do
+    expect(described_class.superclass).to be(Mimic::Engine::Base)
+  end
+
+  # Selected by role, not by config: Registry.for dispatches on
+  # llama.engine and Registry.names drives the setup wizard's engine picker,
+  # so an entry there would offer the encoder as a chat engine.
+  it "is not reachable through the engine registry" do
+    picked = Mimic::EngineCli::Registry.names.map do |name|
+      Mimic::EngineCli::Registry.for(settings(llama: { "engine" => name })).class
+    end
+    expect(picked).not_to include(described_class)
+  end
+
+  describe ".log_file / .pid_file" do
+    it "keeps its own pair rather than the chat server's" do
+      expect(described_class.log_file).not_to eq(Mimic::Engine::Base.log_file)
+      expect(described_class.pid_file).not_to eq(Mimic::Engine::Base.pid_file)
+    end
+
+    it "tails its own log through the inherited reader" do
+      Dir.mktmpdir do |dir|
+        log_path = Pathname.new(dir) / "llama-embed.log"
+        log_path.write("prelude\nembedding server ready\n")
+        allow(described_class).to receive(:log_file).and_return(log_path)
+
+        expect(described_class.log_tail("prelude\n".bytesize)).to eq("embedding server ready\n")
+      end
+    end
+  end
+
+  describe ".stop" do
+    # A /proc scan for "llama-server" would match the chat server, which is
+    # the same binary on a different port.
+    it "never falls back to a /proc scan" do
+      expect(Mimic::Util::Probes).to receive(:stop_pid)
+        .with(described_class.pid_file, "llama-server", exclude: [], fallback: false)
+
+      described_class.stop
+    end
+  end
+
+  describe ".mode_for" do
+    around do |example|
+      Dir.mktmpdir do |dir|
+        @dir = Pathname.new(dir)
+        example.run
+      end
+    end
+
+    it "is rerank when the header asks for rank pooling" do
+      path = @dir / "model.gguf"
+      GgufWriter.write(path, { "general.architecture" => "bert", "bert.pooling_type" => 4 })
+      expect(described_class.mode_for(path)).to eq("rerank")
+    end
+
+    # bge-reranker ships no pooling_type at all, so the filename is the only
+    # thing left that says it ranks pairs instead of embedding one text.
+    it "is rerank when the filename says so and the header is silent" do
+      path = @dir / "bge-reranker-v2-m3-Q8_0.gguf"
+      GgufWriter.write(path, { "general.architecture" => "bert", "bert.attention.causal" => 0 })
+      expect(described_class.mode_for(path)).to eq("rerank")
+    end
+
+    it "is embeddings otherwise" do
+      path = @dir / "bge-m3-Q8_0.gguf"
+      GgufWriter.write(path, { "general.architecture" => "bert", "bert.pooling_type" => 2 })
+      expect(described_class.mode_for(path)).to eq("embeddings")
+    end
+  end
+
+  describe "#command" do
+    it "launches the embedding model on its own port with the embeddings endpoint" do
+      allow(described_class).to receive(:mode_for).and_return("embeddings")
+
+      expect(described_class.new(settings).command("/bin/llama-server")).to eq(
+        ["/bin/llama-server", "-m", "/models/bge-m3-Q8_0.gguf", "-a", "bge-m3",
+         "--host", "0.0.0.0", "--port", "8081", "--ctx-size", "0",
+         "-b", "8192", "-ub", "8192", "-ngl", "999", "--embeddings"]
+      )
+    end
+
+    it "passes a configured batch size through to both batch flags" do
+      allow(described_class).to receive(:mode_for).and_return("embeddings")
+
+      expect(described_class.new(settings(embed: { "batch_size" => 4096 })).command("/bin/llama-server"))
+        .to include("-b", "4096", "-ub", "4096")
+    end
+
+    it "asks for the rerank endpoint when the mode resolves to rerank" do
+      allow(described_class).to receive(:mode_for).and_return("rerank")
+
+      expect(described_class.new(settings).command("/bin/llama-server")).to include("--rerank")
+    end
+
+    it "honours an explicit mode over what the GGUF says" do
+      allow(described_class).to receive(:mode_for).and_return("rerank")
+
+      expect(described_class.new(settings(embed: { "mode" => "embeddings" })).command("/bin/llama-server"))
+        .to include("--embeddings")
+    end
+
+    it "passes a configured context length through" do
+      allow(described_class).to receive(:mode_for).and_return("embeddings")
+
+      expect(described_class.new(settings(embed: { "context_length" => 8192 })).command("/bin/llama-server"))
+        .to include("--ctx-size", "8192")
+    end
+  end
+
+  describe "#start" do
+    it "refuses to start on the chat server's port" do
+      instance = described_class.new(settings(embed: { "port" => 8080 }))
+
+      result = instance.start
+      expect(result).not_to be_ok
+      expect(result.message).to include("same port")
+    end
+
+    it "reports an unconfigured embedding model instead of launching" do
+      instance = described_class.new(settings(embed: { "path" => "" }))
+
+      result = instance.start
+      expect(result).not_to be_ok
+      expect(result.message).to include("llm embed setup")
+    end
+  end
+
+  describe "#running?" do
+    it "probes its own port, not the chat server's" do
+      allow(Mimic::Util::Probes).to receive(:http_ok).with("http://127.0.0.1:8081/health").and_return(true)
+      expect(described_class.new(settings)).to be_running
+    end
+  end
+end

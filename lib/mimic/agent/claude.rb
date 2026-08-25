@@ -2,7 +2,7 @@ require "json"
 require "pathname"
 require "open3"
 require_relative "../paths"
-require_relative "../probes"
+require_relative "../util/probes"
 
 module Mimic
   module Agent
@@ -27,7 +27,7 @@ module Mimic
       # would loop.
       def self.find_binary
         path = ENV.fetch("PATH", "").split(File::PATH_SEPARATOR).reject { |p| p == SHIM_DIR.to_s }.join(File::PATH_SEPARATOR)
-        Probes.which("claude", path)
+        Util::Probes.which("claude", path)
       end
 
       def self.ensure_config_dir
@@ -66,7 +66,7 @@ module Mimic
       # itself, so the bridge gets the same context/KV-cache handling.
       def env
         entry = model_entry
-        base = @settings.base_url
+        base = @settings.llama.base_url
         # env diff (not a full merge): Process.exec/spawn apply a Hash first
         # arg as a diff on top of the inherited environment -- a key must be
         # explicit `=> nil` to unset it, omitting it leaves it inherited.
@@ -86,7 +86,7 @@ module Mimic
         abort "claude binary not found -- install Claude Code first" if self.class.find_binary.nil?
 
         entry = model_entry
-        base = @settings.base_url
+        base = @settings.llama.base_url
         launch_env = local_env(base, Agent::AUTH_TOKEN, entry)
         ENV_UNSET.each { |name| launch_env[name] = nil }
         puts "mimic ready at #{base} · model #{entry['id']}"
@@ -97,11 +97,11 @@ module Mimic
       private
 
       def model_entry
-        { "id" => @settings.model_alias, "context_length" => @settings.context_length }
+        { "id" => @settings.model.name, "context_length" => @settings.model.context_length }
       end
 
       def version
-        executable = Probes.which("claude")
+        executable = Util::Probes.which("claude")
         return nil if executable.nil?
 
         out, = Open3.capture2(executable, "--version")
@@ -117,17 +117,20 @@ module Mimic
       def status_line
         used = %w[input_tokens cache_creation_input_tokens cache_read_input_tokens]
                .map { |field| "(.context_window.current_usage.#{field} // 0)" }.join(" + ")
-        window = @settings.context_length.to_i
+        window = @settings.model.context_length.to_i
         jq = %("\\(.model.display_name) | effort: \\(.effort.level // "?") | ctx \\(((#{used}) / 1000) | floor)K/#{window / 1000}K")
         { "type" => "command", "command" => "jq -r '#{jq}'" }
       end
 
       # mimic's Claude Code settings on top of upstream's defaults. Model
       # aliases keep subagent/haiku routing on the local model instead of a
-      # cloud one that isn't served here.
+      # cloud one that isn't served here. COMMENT_GATE_OFF spares the served
+      # model: the gate's judge call lands on the same single-slot llama-server
+      # and evicts the session's cached prefix, costing a full re-prefill.
       def extra_env
-        model_alias = @settings.model_alias
+        model_alias = @settings.model.name
         {
+          "COMMENT_GATE_OFF" => "1",
           "ANTHROPIC_CUSTOM_MODEL_OPTION" => model_alias,
           "ANTHROPIC_SMALL_FAST_MODEL" => model_alias,
           "ANTHROPIC_DEFAULT_HAIKU_MODEL" => model_alias,

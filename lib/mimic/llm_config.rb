@@ -3,6 +3,9 @@ require "psych"
 require "json"
 require "pathname"
 require_relative "paths"
+require_relative "model"
+require_relative "llm_config/sampling"
+require_relative "llm_config/settings"
 
 # LLM engine config -- model + llama keys, separate from mimic service
 # config. Owned by the `llm` CLI; the main `mimic` config reads from it for
@@ -12,6 +15,9 @@ module Mimic
     LLM_CONFIG_DIR = Paths::LLM_ROOT
     LLM_CONFIG_PATH = LLM_CONFIG_DIR / "config.yaml"
     MODEL_CTX_PATH = LLM_CONFIG_DIR / "model-ctx.json"
+    MODEL_MMPROJ_PATH = LLM_CONFIG_DIR / "model-mmproj.json"
+    MODEL_COMPUTE_PATH = LLM_CONFIG_DIR / "model-compute.json"
+    MODEL_SAMPLING_PATH = LLM_CONFIG_DIR / "model-sampling.json"
     LEGACY_CONFIG = Paths::STATE_DIR / "llm_config.yaml"
 
     BUILTIN_MODEL_DIRS = [
@@ -26,12 +32,7 @@ module Mimic
         "search_paths" => [],
         "context_length" => 122_880,
         "mtp" => "auto",
-        "temperature" => 0.6,
-        "top_p" => 0.95,
-        "top_k" => 20,
-        "min_p" => 0.0,
-        "presence_penalty" => 1.5,
-        "repeat_penalty" => 1.0,
+        "reasoning" => "auto",
       },
       "llama" => {
         "engine" => "llama.cpp",
@@ -40,7 +41,14 @@ module Mimic
         "flash_attn" => "on",
         "cache_type" => "q8_0",
         "n_slots" => 1,
-        "binary" => "",
+        "binary" => {},
+      },
+      "embed" => {
+        "path" => "",
+        "port" => 8081,
+        "context_length" => 0,
+        "batch_size" => 8192,
+        "mode" => "auto",
       },
     }.freeze
 
@@ -58,15 +66,13 @@ module Mimic
         return Settings.new(merge(DEFAULTS, {})) unless LLM_CONFIG_PATH.exist?
 
         data = Psych.safe_load(LLM_CONFIG_PATH.read, permitted_classes: [Symbol, Date, Time], aliases: true) || {}
-        Settings.new(merge(DEFAULTS, data))
+        migrate_stores(Settings.new(merge(DEFAULTS, data)))
       end
 
       def exists?
         migrate_legacy
         LLM_CONFIG_PATH.exist?
       end
-
-      def recall_ctx(model_path) = CtxStore.recall(model_path)
 
       # ~/hf-models is a tree of per-file symlinks into their .lmstudio
       # targets, and this store has to be keyed by the resolved target so a
@@ -92,150 +98,47 @@ module Mimic
         LLM_CONFIG_DIR.mkpath
         LEGACY_CONFIG.rename(LLM_CONFIG_PATH)
       end
+
+      # Relocate the fields that used to sit flat in config.yaml:
+      # model.mmproj_path (now per model, in MmprojStore) and a plain
+      # llama.binary string (now per engine). Both are relocated with the
+      # attribution they had when they were written -- the projector to the
+      # model that is configured, the binary to the engine that is configured
+      # -- and the old keys are dropped so nothing reads them again. The
+      # sampler keys are dropped outright: they resolve from the chosen
+      # model's own header now, so a stale hand-edited value would only
+      # contradict it. model.thinking was a boolean translated to the engines'
+      # reasoning value at read time; the value itself is stored now, so the
+      # translation happens once here instead.
+      def migrate_stores(settings)
+        cfg = settings.to_h
+        legacy_binary = cfg["llama"]["binary"] if cfg["llama"]["binary"].is_a?(String)
+        legacy_sampling = Sampling::KEYS.any? { |key| cfg["model"].key?(key) }
+        legacy_thinking = cfg["model"].key?("thinking")
+        return settings unless cfg["model"].key?("mmproj_path") || legacy_binary ||
+                               legacy_sampling || legacy_thinking
+
+        projector = cfg["model"].delete("mmproj_path").to_s
+        settings.model.mmproj_path = projector unless projector.empty?
+        settings.llama.binary = legacy_binary if legacy_binary
+        settings.model.reasoning = cfg["model"].delete("thinking") ? "auto" : "off" if legacy_thinking
+        Sampling::KEYS.each { |key| cfg["model"].delete(key) }
+        settings.save
+        settings
+      end
     end
 
-    # The context each model last booted at, keyed by resolved GGUF path.
-    #
-    # config.yaml holds one active profile, so switching models overwrites
-    # the context it was tuned for and the next pick starts from whatever
-    # the last model used -- which is how an oversized preset gets carried
-    # onto a model that cannot hold it. This file is per-model and
-    # additive, like ik-n-cpu-moe.json.
-    module CtxStore
+    module MmprojStore
       class << self
-        def recall(model_path)
-          entry = read[LlmConfig.resolve_path(model_path)]
-          return nil unless entry
+        def recall(model_path) = store.fetch(model_path)
 
-          [entry["context_length"], entry["cache_type"]]
-        end
-
-        def remember(model_path, context_length, cache_type)
-          known = read
-          known[LlmConfig.resolve_path(model_path)] = {
-            "context_length" => context_length,
-            "cache_type" => cache_type,
-          }
-          LLM_CONFIG_DIR.mkpath
-          MODEL_CTX_PATH.write(JSON.pretty_generate(known))
+        def remember(model_path, mmproj_path)
+          mmproj_path.nil? ? store.delete(model_path) : store.write(model_path, mmproj_path)
         end
 
         private
 
-        def read
-          JSON.parse(MODEL_CTX_PATH.read)
-        rescue SystemCallError, JSON::ParserError
-          {}
-        end
-      end
-    end
-
-    class Settings
-      QUANT_MARKERS = %w[-Q4 -Q5 -Q6 -Q8 -IQ -F16 -BF16].freeze
-
-      def self.alias_for(path)
-        stem = Pathname.new(path).basename(".*").to_s
-        marker = QUANT_MARKERS.find { |m| stem.include?(m) }
-        marker ? stem.split(marker).first : stem
-      end
-
-      def initialize(cfg)
-        @cfg = cfg
-      end
-
-      def model_path = @cfg["model"]["path"]
-      def context_length = @cfg["model"]["context_length"]
-      def cache_type = @cfg["llama"]["cache_type"]
-      def engine = @cfg["llama"].fetch("engine", "llama.cpp")
-      def port = @cfg["llama"]["port"]
-      def host = @cfg["llama"]["host"]
-      def n_slots = @cfg["llama"].fetch("n_slots", 1)
-      def flash_attn = @cfg["llama"]["flash_attn"]
-      def mtp = @cfg["model"].fetch("mtp", "auto")
-      def binary = @cfg["llama"]["binary"]
-
-      def save
-        LLM_CONFIG_DIR.mkpath
-        LLM_CONFIG_PATH.write(Psych.dump(@cfg.slice("model", "llama")))
-      end
-
-      def remember_ctx
-        CtxStore.remember(model_path, context_length, cache_type)
-      end
-
-      def search_paths
-        (BUILTIN_MODEL_DIRS + configured_search_paths.map { |dir| Pathname.new(dir.to_s).expand_path }).uniq
-      end
-
-      def add_search_path(dir)
-        wanted = Pathname.new(dir.to_s).expand_path
-        return :builtin if BUILTIN_MODEL_DIRS.include?(wanted)
-        return :duplicate if configured_search_paths.map { |p| Pathname.new(p).expand_path }.include?(wanted)
-
-        store_search_paths(configured_search_paths + [wanted.to_s])
-        :added
-      end
-
-      def remove_search_path(dir)
-        wanted = Pathname.new(dir.to_s).expand_path
-        stored = configured_search_paths
-        kept = stored.reject { |p| Pathname.new(p).expand_path == wanted }
-        return BUILTIN_MODEL_DIRS.include?(wanted) ? :builtin : :missing if kept.size == stored.size
-
-        store_search_paths(kept)
-        :removed
-      end
-
-      def model_path=(value)
-        @cfg["model"]["path"] = value
-      end
-
-      def context_length=(value)
-        @cfg["model"]["context_length"] = value
-      end
-
-      def cache_type=(value)
-        @cfg["llama"]["cache_type"] = value
-      end
-
-      def engine=(value)
-        @cfg["llama"]["engine"] = value
-      end
-
-      def binary=(value)
-        @cfg["llama"]["binary"] = value
-      end
-
-      def n_slots=(value)
-        @cfg["llama"]["n_slots"] = value
-      end
-
-      def temperature = @cfg["model"]["temperature"]
-      def top_p = @cfg["model"]["top_p"]
-      def top_k = @cfg["model"]["top_k"]
-      def min_p = @cfg["model"]["min_p"]
-      def presence_penalty = @cfg["model"]["presence_penalty"]
-      def repeat_penalty = @cfg["model"]["repeat_penalty"]
-
-      def ik? = engine == "ik_llama.cpp"
-
-      # Loopback URL for clients, not the server's bind address.
-      #
-      # `llama.host` is 0.0.0.0 so containers can reach the server; writing
-      # that into a client-facing URL would be wrong -- every client on this
-      # host (mimic claude/codex, hermes, status checks) dials 127.0.0.1.
-      def base_url = "http://127.0.0.1:#{port}"
-
-      def model_alias = self.class.alias_for(model_path)
-
-      def to_h = @cfg
-
-      private
-
-      def configured_search_paths = @cfg.dig("model", "search_paths") || []
-
-      def store_search_paths(paths)
-        (@cfg["model"] ||= {})["search_paths"] = paths
+        def store = Model::Store.new(MODEL_MMPROJ_PATH)
       end
     end
   end
