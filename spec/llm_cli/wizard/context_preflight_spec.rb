@@ -52,10 +52,22 @@ RSpec.describe Mimic::LlmCli::Wizard::ContextPreflight do
   it "passes the measured compute cost to the estimate when one was recorded" do
     Mimic::Model.new("/m.gguf").memory.remember_compute(60_000, "q8_0", 1712)
     expect_any_instance_of(Mimic::Model).to receive(:footprint)
-      .with(60_000, "q8_0", compute_mib: 1712, slots: 1, reclaimable_mib: 0)
+      .with(60_000, "q8_0", compute_mib: 1712, slots: 1, reclaimable_mib: 0, mmproj_path: nil)
       .and_return(footprint_double(fits?: true, need_mib: 1000.0, total_mib: 24_000, max_ctx: 5000))
 
     expect { preflight.ok? }.to output(/VRAM ok/).to_stdout
+  end
+
+  it "estimates only the projector selected for launch" do
+    cfg = base_cfg
+    settings = Mimic::LlmConfig::Settings.new(cfg)
+    allow(settings.model).to receive(:mmproj_path).and_return("/selected-mmproj.gguf")
+    model = settings.model.file
+    allow(model).to receive(:footprint).and_return(footprint_double(measurable?: false))
+
+    described_class.new(settings, prompt: instance_double(Mimic::Ui::Prompt)).ok?
+
+    expect(model).to have_received(:footprint).with(60_000, "q8_0", hash_including(mmproj_path: "/selected-mmproj.gguf"))
   end
 
   # A MoE model has a lever the warning never offered: move experts to the

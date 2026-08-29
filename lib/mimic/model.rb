@@ -65,8 +65,9 @@ module Mimic
     def supports_mtp? = header.supports_mtp?
     def moe? = header.moe? == true
 
-    def footprint(ctx, cache_type, compute_mib: nil, drafting: false, slots: 1, reclaimable_mib: 0)
-      Footprint.new(header, ctx: ctx, cache_type: cache_type, weights_bytes: weights_bytes,
+    def footprint(ctx, cache_type, compute_mib: nil, drafting: false, slots: 1, reclaimable_mib: 0,
+                  mmproj_path: projector)
+      Footprint.new(header, ctx: ctx, cache_type: cache_type, weights_bytes: weights_bytes(mmproj_path),
                             compute_mib: compute_mib, drafting: drafting, slots: slots,
                             reclaimable_mib: reclaimable_mib)
     end
@@ -75,16 +76,16 @@ module Mimic
 
     def header = @header ||= Header.new(path)
 
-    def weights_bytes
-      File.size(path) + projector_bytes
+    def weights_bytes(mmproj_path)
+      File.size(path) + projector_bytes(mmproj_path)
     rescue SystemCallError
       nil
     end
 
     # A vision model's projector is loaded onto the GPU with --mmproj, so it
     # spends VRAM the decoder's own file size does not account for.
-    def projector_bytes
-      projector ? File.size(projector) : 0
+    def projector_bytes(mmproj_path)
+      mmproj_path ? File.size(mmproj_path) : 0
     rescue SystemCallError
       0
     end

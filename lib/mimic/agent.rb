@@ -5,11 +5,13 @@ require_relative "util/probes"
 # Codex stand in for Unsloth Studio -- those two only, no opencode/goose/pi/
 # openclaw, no --as-subagent, no auto-install -- and Unsloth Studio's HTTP
 # client-key/model-resolution dance is skipped entirely, since mimic always
-# points straight at llama-server. Hermes is not an Unsloth agent; it sits
-# here because mimic launches it too, and it owns the ~/.hermes tree.
+# points straight at llama-server. Hermes and Muse are not Unsloth agents;
+# they sit here because mimic launches them too, and Hermes owns the
+# ~/.hermes tree.
 #
 # This module holds only what the launchers share; per-agent wiring lives in
-# agent/claude.rb, agent/codex.rb and agent/hermes.rb, which have almost
+# agent/claude.rb, agent/codex.rb, agent/hermes.rb and agent/muse.rb, which
+# have almost
 # nothing in common beyond spawning a process.
 module Mimic
   module Agent
@@ -41,3 +43,4 @@ end
 require_relative "agent/claude"
 require_relative "agent/codex"
 require_relative "agent/hermes"
+require_relative "agent/muse"

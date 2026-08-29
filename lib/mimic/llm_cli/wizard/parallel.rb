@@ -61,7 +61,8 @@ module Mimic
           model = @config.model.file
           est = model.footprint(total, @config.llama.cache_type,
                                 compute_mib: model.memory.compute_mib(total, @config.llama.cache_type),
-                                slots: slots, reclaimable_mib: Engine::ServerProcess.chat.gpu_mib)
+                                slots: slots, reclaimable_mib: Engine::ServerProcess.chat.gpu_mib,
+                                mmproj_path: @config.model.mmproj_path)
           tag = !est.measurable? || est.fits? ? Ui.green("fits") : Ui.red("too big")
           format("  %2d slots -> %10s total ctx  %s", slots, Util::Fmt.commas(total), tag)
         end

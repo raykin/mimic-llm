@@ -103,7 +103,8 @@ module Mimic
       def record_compute(pid)
         pids = [pid, *Util::Probes.descendants(pid)]
         estimate = @settings.model.file.footprint(@settings.model.context_length, @settings.llama.cache_type,
-                                                  compute_mib: 0, slots: @settings.llama.n_slots)
+                                                  compute_mib: 0, slots: @settings.llama.n_slots,
+                                                  mmproj_path: @settings.model.mmproj_path)
         overhead = estimate.measured_overhead_mib(pids: pids)
         return if overhead.nil?
 

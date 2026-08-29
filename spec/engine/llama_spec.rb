@@ -199,7 +199,7 @@ RSpec.describe Mimic::Engine::Llama do
       measured = instance_double(Mimic::Model::Footprint)
       allow(measured).to receive(:measured_overhead_mib).with(pids: [4242, 4243]).and_return(2431)
       expect_any_instance_of(Mimic::Model).to receive(:footprint)
-        .with(4096, "q8_0", compute_mib: 0, slots: 1).and_return(measured)
+        .with(4096, "q8_0", compute_mib: 0, slots: 1, mmproj_path: nil).and_return(measured)
 
       expect(described_class.new(settings).start.ok?).to be true
       expect(Mimic::Model.new("/models/foo-Q4_K_M.gguf").memory.compute_mib(4096, "q8_0")).to eq(2431)

@@ -175,7 +175,8 @@ module Mimic
         cache_type = @settings.llama.cache_type
         estimate = model.footprint(ctx, cache_type, compute_mib: model.memory.compute_mib(ctx, cache_type),
                                                     drafting: drafting, slots: @settings.llama.n_slots,
-                                                    reclaimable_mib: process.gpu_mib)
+                                                    reclaimable_mib: process.gpu_mib,
+                                                    mmproj_path: @settings.model.mmproj_path)
         return 0 if !estimate.measurable? || estimate.fits?
 
         ceiling = [CPU_MOE_MAX, Model::Header.new(model_path).block_count || CPU_MOE_MAX].min
@@ -210,7 +211,8 @@ module Mimic
         cache_type = @settings.llama.cache_type
         model = @settings.model.file
         model.footprint(ctx, cache_type, compute_mib: model.memory.compute_mib(ctx, cache_type), drafting: true,
-                                     slots: @settings.llama.n_slots, reclaimable_mib: process.gpu_mib)
+                                     slots: @settings.llama.n_slots, reclaimable_mib: process.gpu_mib,
+                                     mmproj_path: @settings.model.mmproj_path)
       end
 
       def build_command(binary, n_cpu_moe = 0)

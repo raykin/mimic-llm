@@ -80,6 +80,18 @@ RSpec.describe Mimic::Model::Footprint do
       expect(paired.max_ctx).to be < alone.max_ctx
     end
 
+    it "does not count a discovered projector when vision is disabled" do
+      path = model_path
+      GgufWriter.write(@dir / "mmproj-F32.gguf", { "general.type" => "mmproj" },
+                       tensors: [["data", 3 * 1024 * 1024]])
+
+      with_vision = Mimic::Model.new(path).footprint(100, "q8_0")
+      without_vision = Mimic::Model.new(path).footprint(100, "q8_0", mmproj_path: nil)
+
+      expect(with_vision.weights_mib - without_vision.weights_mib).to be_within(0.01).of(3)
+      expect(without_vision.max_ctx).to be > with_vision.max_ctx
+    end
+
     # The budget is what's left after the desktop reserve, and the estimate has
     # to carry the compute-buffer headroom -- a ctx that only fits by ignoring
     # either one loads and then dies once the KV cache fills.

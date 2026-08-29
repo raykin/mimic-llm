@@ -3,13 +3,14 @@ require_relative "llm_config"
 require_relative "engine"
 require_relative "health"
 require_relative "agent/hermes"
+require_relative "paths"
 
 module Mimic
   # mimic/claude/codex/hermes-lcc all take a REMAINDER of pass-through
   # args after the subcommand name, which Thor's own flag parser would
   # otherwise try (and fail) to interpret -- dispatch manually instead.
   class Cli
-    Command = Struct.new(:name, :help, :menu, :handler)
+    Command = Struct.new(:name, :help, :menu, :handler, :dev)
 
     COMMANDS = [
       Command.new("verify", "check installs, running services and recent errors",
@@ -22,11 +23,18 @@ module Mimic
                   "Launch Claude Code -- direct to llama.cpp (Unsloth start recipe)", :claude),
       Command.new("codex", "Codex -> llama.cpp via Unsloth's config recipe",
                   "Launch Codex -- direct to llama.cpp (Unsloth config recipe)", :codex),
+      # `dev` holds muse back from an installed gem. It is wired correctly,
+      # but llama-server's /v1/responses stream omits `model` from
+      # response.created and muse aborts on the first event -- upstream
+      # llama.cpp PR #21174 is the fix, unmerged. Nothing an installed gem
+      # can do about it, so it is not offered there.
+      Command.new("muse", "Muse Code -> llama.cpp via its Responses base URL",
+                  "Launch Muse Code -- direct to llama.cpp (Responses API)", :muse, true),
     ].freeze
 
     # The menu leads with the launchers -- what someone opening it without a
     # command almost always wants -- so it does not follow the help order.
-    MENU_ORDER = %w[hermes-lcc claude codex verify install-hermes].freeze
+    MENU_ORDER = %w[hermes-lcc claude codex muse verify install-hermes].freeze
 
     HELP_FLAGS = %w[-h --help].freeze
 
@@ -39,7 +47,7 @@ module Mimic
       return menu unless command
       return print_help if HELP_FLAGS.include?(command)
 
-      entry = COMMANDS.find { |c| c.name == command }
+      entry = commands.find { |c| c.name == command }
       return unknown_command unless entry
 
       send(entry.handler, extra)
@@ -56,7 +64,11 @@ module Mimic
 
     def command = @argv.first
     def extra = @argv[1..] || []
-    def menu_entries = MENU_ORDER.map { |name| COMMANDS.find { |c| c.name == name } }
+
+    # Every command this build offers: a dev-only one is absent in an
+    # installed gem and present in a checkout.
+    def commands = COMMANDS.reject { |c| c.dev && !Paths.dev_build? }
+    def menu_entries = MENU_ORDER.filter_map { |name| commands.find { |c| c.name == name } }
 
     def hermes_lcc(extra)
       cfg = require_config
@@ -76,6 +88,13 @@ module Mimic
       require_llama_running!(cfg, "`mimic codex`")
       require_relative "agent"
       Agent::Codex.new(cfg).launch(extra)
+    end
+
+    def muse(extra)
+      cfg = require_config
+      require_llama_running!(cfg, "`mimic muse`")
+      require_relative "agent"
+      Agent::Muse.new(cfg).launch(extra)
     end
 
     # Single stack check: installs, running services, recent errors.
@@ -133,8 +152,8 @@ module Mimic
     end
 
     def command_lines
-      width = COMMANDS.map { |c| c.name.length }.max + 1
-      COMMANDS.map { |c| "  #{c.name.ljust(width)}#{c.help}" }.join("\n")
+      width = commands.map { |c| c.name.length }.max + 1
+      commands.map { |c| "  #{c.name.ljust(width)}#{c.help}" }.join("\n")
     end
   end
 end

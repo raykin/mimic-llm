@@ -40,7 +40,8 @@ module Mimic
         def estimate
           model = @config.model.file
           model.footprint(ctx, cache_type, compute_mib: model.memory.compute_mib(ctx, cache_type),
-                          slots: @config.llama.n_slots, reclaimable_mib: Engine::ServerProcess.chat.gpu_mib)
+                          slots: @config.llama.n_slots, reclaimable_mib: Engine::ServerProcess.chat.gpu_mib,
+                          mmproj_path: @config.model.mmproj_path)
         end
 
         def ctx = @config.model.context_length

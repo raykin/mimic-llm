@@ -6,6 +6,7 @@ RSpec.describe Mimic::Cli do
   let(:cfg) { instance_double(Mimic::LlmConfig::Settings) }
 
   before do
+    allow(Mimic::Paths).to receive(:dev_build?).and_return(true)
     allow(Mimic::LlmConfig).to receive_messages(exists?: true, load: cfg)
     allow(Mimic::Engine::Llama).to receive(:new).with(cfg).and_return(instance_double(Mimic::Engine::Llama, running?: true))
   end
@@ -23,9 +24,46 @@ RSpec.describe Mimic::Cli do
       hermes-lcc     Hermes -> claude-code skill -> Claude Code -> llama.cpp
       claude         Claude Code -> llama.cpp via Unsloth's start recipe
       codex          Codex -> llama.cpp via Unsloth's config recipe
+      muse           Muse Code -> llama.cpp via its Responses base URL
 
     (no command)    interactive menu
   HELP
+
+  RELEASE_HELP = HELP.sub(/^ *muse .*\n/, "").freeze
+
+  # muse is held back from an installed gem: llama-server's /v1/responses
+  # stream omits `model` from response.created, so the launcher cannot work
+  # until llama.cpp PR #21174 lands.
+  describe "a dev-only command" do
+    before { allow(Mimic::Paths).to receive(:dev_build?).and_return(false) }
+
+    it "is absent from the help of an installed gem" do
+      expect { run(["-h"]) }.to output(RELEASE_HELP).to_stdout
+    end
+
+    it "is absent from that gem's menu" do
+      offered = nil
+      prompt = instance_double(Mimic::Ui::Prompt)
+      allow(prompt).to receive(:select) do |_question, options|
+        offered = options
+        "Verify stack (installs, services, errors)"
+      end
+      allow(Mimic::Ui::Prompt).to receive(:new).and_return(prompt)
+      allow(Mimic::Health).to receive(:run).and_return(true)
+
+      described_class.new([]).menu
+
+      expect(offered).not_to include("Launch Muse Code -- direct to llama.cpp (Responses API)")
+    end
+
+    it "does not run there even when typed" do
+      allow(Mimic::Agent::Muse).to receive(:new)
+
+      expect { expect { run(["muse"]) }.to raise_error(SystemExit) }
+        .to output(/unknown command: muse/).to_stderr.and output(RELEASE_HELP).to_stdout
+      expect(Mimic::Agent::Muse).not_to have_received(:new)
+    end
+  end
 
   describe "help" do
     it "prints the command list verbatim for -h and --help" do
@@ -84,7 +122,8 @@ RSpec.describe Mimic::Cli do
       expect(Mimic::Agent::Hermes).to have_received(:launch).with(cfg, ["--verbose", "-p", "hi"])
     end
 
-    { "claude" => Mimic::Agent::Claude, "codex" => Mimic::Agent::Codex }.each do |command, agent|
+    { "claude" => Mimic::Agent::Claude, "codex" => Mimic::Agent::Codex, "muse" => Mimic::Agent::Muse }
+      .each do |command, agent|
       it "passes the remaining argv through to #{command}" do
         launcher = instance_double(agent, launch: nil)
         allow(agent).to receive(:new).with(cfg).and_return(launcher)
@@ -100,7 +139,7 @@ RSpec.describe Mimic::Cli do
     it "aborts every config-taking command when no LLM config exists" do
       allow(Mimic::LlmConfig).to receive(:exists?).and_return(false)
 
-      %w[verify hermes-lcc claude codex].each do |command|
+      %w[verify hermes-lcc claude codex muse].each do |command|
         expect { run([command]) }.to raise_error(SystemExit).and output(/no LLM config yet/).to_stderr
       end
     end
@@ -121,6 +160,7 @@ RSpec.describe Mimic::Cli do
         "Launch Hermes + Claude Code bridge (claude-code skill direct to llama.cpp)",
         "Launch Claude Code -- direct to llama.cpp (Unsloth start recipe)",
         "Launch Codex -- direct to llama.cpp (Unsloth config recipe)",
+        "Launch Muse Code -- direct to llama.cpp (Responses API)",
         "Verify stack (installs, services, errors)",
         "Install hermes-agent into an isolated venv",
       ]
@@ -141,7 +181,7 @@ RSpec.describe Mimic::Cli do
     end
 
     it "dispatches the picked label with no pass-through args" do
-      allow(Mimic::Ui::Prompt).to receive(:new).and_return(prompt_picking(labels[3]))
+      allow(Mimic::Ui::Prompt).to receive(:new).and_return(prompt_picking(labels[4]))
       allow(Mimic::Health).to receive(:run).and_return(true)
 
       described_class.new([]).menu
@@ -150,7 +190,7 @@ RSpec.describe Mimic::Cli do
     end
 
     it "reaches the menu when run gets no command at all" do
-      allow(Mimic::Ui::Prompt).to receive(:new).and_return(prompt_picking(labels[3]))
+      allow(Mimic::Ui::Prompt).to receive(:new).and_return(prompt_picking(labels[4]))
       allow(Mimic::Health).to receive(:run).and_return(true)
 
       run([])
