@@ -11,6 +11,8 @@ module Mimic
       ENV_KEY = "UNSLOTH_STUDIO_AUTH_TOKEN"
       PROVIDER_HEADER = "[model_providers.#{PROFILE}]"
       MODEL_CATALOG_MIN_VERSION = [0, 110, 0].freeze
+      PATCH_LINE_ENDINGS_MIN_VERSION = [0, 148, 0].freeze
+      ENV_UNSET = %w[OPENAI_API_KEY CODEX_API_KEY CODEX_ACCESS_TOKEN].freeze
       FALLBACK_PROMPT = Pathname.new(__dir__) / "codex_fallback_prompt.md"
 
       MANAGED_KEYS = /\s*(oss_provider|model_provider|model|model_context_window)\s*=/
@@ -35,6 +37,7 @@ module Mimic
         seed_home
         write_config(base, entry)
         launch_env = { ENV_KEY => Agent::AUTH_TOKEN, "CODEX_HOME" => home.to_s }
+        ENV_UNSET.each { |name| launch_env[name] = nil }
         puts "mimic ready at #{base} · model #{entry['id']}"
         code = Agent.spawn_and_wait(command(extra_args), launch_env)
         raise SystemExit, code if code&.nonzero?
@@ -68,19 +71,21 @@ module Mimic
           "stream_idle_timeout_ms = #{STREAM_IDLE_TIMEOUT_MS}\n"
       end
 
-      def supports_model_catalog?
+      # nil: no codex on PATH yet, so assume a current build. An unreadable
+      # version counts as too old.
+      def codex_version
         executable = Util::Probes.which("codex")
-        return true if executable.nil?
+        return nil if executable.nil?
 
         out, status = Open3.capture2(executable, "--version")
-        return false unless status.success?
-
-        match = out.match(/(\d+)\.(\d+)\.(\d+)/)
-        return false unless match
-
-        Agent.version_at_least?(match.captures.map(&:to_i), MODEL_CATALOG_MIN_VERSION)
+        match = status.success? && out.match(/(\d+)\.(\d+)\.(\d+)/)
+        match ? match.captures.map(&:to_i) : [0]
       rescue Errno::ENOENT
-        false
+        [0]
+      end
+
+      def supports?(version, floor)
+        version.nil? || Agent.version_at_least?(version, floor)
       end
 
       # Conservative metadata for a model unknown to Codex's built-in catalog.
@@ -102,7 +107,7 @@ module Mimic
           "supports_reasoning_summary_parameter" => false,
           "support_verbosity" => false,
           "default_verbosity" => nil,
-          "apply_patch_tool_type" => nil,
+          "apply_patch_tool_type" => "freeform",
           "truncation_policy" => { "mode" => "bytes", "limit" => 10_000 },
           "supports_parallel_tool_calls" => false,
           "experimental_supported_tools" => [],
@@ -124,7 +129,12 @@ module Mimic
         profile_text = +"oss_provider = \"#{PROFILE}\"\n" \
                         "model_provider = \"#{PROFILE}\"\n" \
                         "model = #{JSON.generate(model['id'])}\n"
-        if supports_model_catalog? && FALLBACK_PROMPT.file?
+        version = codex_version
+        if supports?(version, PATCH_LINE_ENDINGS_MIN_VERSION)
+          profile_text << "suppress_unstable_features_warning = true\n" \
+                          "features.apply_patch_preserve_line_endings = true\n"
+        end
+        if supports?(version, MODEL_CATALOG_MIN_VERSION) && FALLBACK_PROMPT.file?
           catalog = home / "model-catalog.json"
           catalog_text = "#{JSON.pretty_generate(model_catalog(model))}\n"
           catalog.write(catalog_text) if !catalog.exist? || catalog.read != catalog_text

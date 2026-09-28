@@ -10,8 +10,15 @@ module Mimic
       SHIM_DIR = Paths::STATE_DIR / "bin"
 
       DYNAMIC_SECTIONS_FLAG = "--exclude-dynamic-system-prompt-sections"
-      MIN_SETTINGS_VERSION = [2, 1, 98].freeze
-      ENV_UNSET = %w[ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN].freeze
+      MIN_DYNAMIC_SECTIONS_VERSION = [2, 1, 98].freeze
+      # Provider routing overrides ANTHROPIC_BASE_URL and would send the
+      # session past llama-server.
+      ENV_UNSET = %w[
+        ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_UNIX_SOCKET
+        CLAUDE_CODE_USE_FOUNDRY ANTHROPIC_FOUNDRY_BASE_URL ANTHROPIC_FOUNDRY_RESOURCE
+        CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_ANTHROPIC_AWS
+        CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD CLAUDE_CODE_USE_MANTLE
+      ].freeze
 
       # WebSearch/WebFetch are Anthropic server-executed tools -- llama.cpp's
       # /v1/messages bridge has no implementation (server log: "unsupported
@@ -26,44 +33,6 @@ module Mimic
         path = ENV.fetch("PATH", "").split(File::PATH_SEPARATOR).reject { |p| p == SHIM_DIR.to_s }.join(File::PATH_SEPARATOR)
         Util::Probes.which("claude", path)
       end
-
-      def self.ensure_config_dir
-        config_dir = Paths::CLAUDE_CONFIG_DIR
-        config_dir.mkpath
-        seed = config_dir / ".claude.json"
-        seed.write("#{JSON.generate({ hasCompletedOnboarding: true })}\n") unless seed.exist?
-        settings_file = config_dir / "settings.json"
-        user_settings = Pathname.new(Dir.home) / ".claude" / "settings.json"
-        settings_file.make_symlink(user_settings) if !settings_file.exist? && user_settings.exist?
-        merge_mcp_config(seed)
-        config_dir
-      end
-
-      # Whatever the user opted into, or nothing.
-      def self.mcp_servers
-        JSON.parse(Paths::MCP_SERVERS_PATH.read)
-      rescue SystemCallError, JSON::ParserError
-        {}
-      end
-
-      # Seeds/refreshes those entries in the isolated .claude.json -- merged,
-      # not overwritten, since CC writes its own runtime state (onboarding,
-      # tips, startup counts) into this same file and the user may have added
-      # servers of their own.
-      def self.merge_mcp_config(seed)
-        wanted = mcp_servers
-        return if wanted.empty?
-
-        data = seed.exist? ? JSON.parse(seed.read) : {}
-        current = data["mcpServers"].is_a?(Hash) ? data["mcpServers"] : {}
-        return if wanted.all? { |name, spec| current[name] == spec }
-
-        data["mcpServers"] = current.merge(wanted)
-        seed.write("#{JSON.generate(data)}\n")
-      rescue JSON::ParserError
-        nil
-      end
-      private_class_method :merge_mcp_config
 
       def initialize(settings)
         @settings = settings
@@ -104,6 +73,42 @@ module Mimic
 
       private
 
+      def ensure_config_dir
+        config_dir = Paths::CLAUDE_CONFIG_DIR
+        config_dir.mkpath
+        seed = config_dir / ".claude.json"
+        seed.write("#{JSON.generate({ hasCompletedOnboarding: true })}\n") unless seed.exist?
+        settings_file = config_dir / "settings.json"
+        user_settings = Pathname.new(Dir.home) / ".claude" / "settings.json"
+        settings_file.make_symlink(user_settings) if !settings_file.exist? && user_settings.exist?
+        merge_mcp_config(seed)
+        config_dir
+      end
+
+      # Whatever the user opted into, or nothing.
+      def mcp_servers
+        JSON.parse(Paths::MCP_SERVERS_PATH.read)
+      rescue SystemCallError, JSON::ParserError
+        {}
+      end
+
+      # Seeds/refreshes those entries in the isolated .claude.json -- merged,
+      # not overwritten, since CC writes its own runtime state (onboarding,
+      # tips, startup counts) into this same file and the user may have added
+      # servers of their own.
+      def merge_mcp_config(seed)
+        wanted = mcp_servers
+        return if wanted.empty?
+
+        data = seed.exist? ? JSON.parse(seed.read) : {}
+        current = data["mcpServers"].is_a?(Hash) ? data["mcpServers"] : {}
+        return if wanted.all? { |name, spec| current[name] == spec }
+
+        data["mcpServers"] = current.merge(wanted)
+        seed.write("#{JSON.generate(data)}\n")
+      rescue JSON::ParserError
+        nil
+      end
       def model_entry
         { "id" => @settings.model.name, "context_length" => @settings.model.context_length }
       end
@@ -119,9 +124,7 @@ module Mimic
         [0]
       end
 
-      # Status line whose ctx denominator is the served window, not Claude's
-      # guess. Claude Code has no way to be told a custom model's context
-      # window, so bake the real ctx in here.
+      # Status line whose ctx denominator is the served window.
       def status_line
         used = %w[input_tokens cache_creation_input_tokens cache_read_input_tokens]
                .map { |field| "(.context_window.current_usage.#{field} // 0)" }.join(" + ")
@@ -144,16 +147,21 @@ module Mimic
           "ANTHROPIC_DEFAULT_HAIKU_MODEL" => model_alias,
           "ANTHROPIC_DEFAULT_SONNET_MODEL" => model_alias,
           "ANTHROPIC_DEFAULT_OPUS_MODEL" => model_alias,
-          "CLAUDE_CONFIG_DIR" => self.class.ensure_config_dir.to_s,
+          "CLAUDE_CONFIG_DIR" => ensure_config_dir.to_s,
         }
       end
 
+      # Claude applies user/project settings env after the process env, so
+      # the local env is pinned again here, at the command-line tier, with
+      # ENV_UNSET blanked.
       def settings_overlay(model_id)
+        pinned = local_env(@settings.llama.base_url, Agent::AUTH_TOKEN, model_entry).except("CLAUDE_CONFIG_DIR")
         {
-          "env" => {
+          "env" => ENV_UNSET.to_h { |name| [name, ""] }.merge(
+            pinned,
             "CLAUDE_CODE_ATTRIBUTION_HEADER" => "0",
             "CLAUDE_CODE_SUBAGENT_MODEL" => "inherit",
-          },
+          ),
           "availableModels" => [model_id],
           "permissions" => { "ask" => %w[Task Agent], "deny" => DENIED_TOOLS },
           "statusLine" => status_line,
@@ -161,10 +169,11 @@ module Mimic
       end
 
       def flags(model_id)
+        settings = ["--settings", JSON.generate(settings_overlay(model_id))]
         current = version
-        return [] if current && !Agent.version_at_least?(current, MIN_SETTINGS_VERSION)
+        return settings if current && !Agent.version_at_least?(current, MIN_DYNAMIC_SECTIONS_VERSION)
 
-        [DYNAMIC_SECTIONS_FLAG, "--settings", JSON.generate(settings_overlay(model_id))]
+        [DYNAMIC_SECTIONS_FLAG, *settings]
       end
 
       def local_env(base, key, entry)
@@ -173,12 +182,17 @@ module Mimic
           "ANTHROPIC_AUTH_TOKEN" => key,
           "ANTHROPIC_MODEL" => entry["id"],
           "CLAUDE_CODE_ATTRIBUTION_HEADER" => "0",
+          # Per-tool countdown reminders change the system prefix.
+          "CLAUDE_CODE_TOTAL_TOKENS_REMINDER" => "off",
           "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" => "1",
           "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS" => "1",
           "CLAUDE_CODE_NO_FLICKER" => "1",
         }
         window = entry["context_length"]
         if window
+          # Claude assumes 200k for a model id it does not know and clamps
+          # AUTO_COMPACT_WINDOW to that; MAX_CONTEXT_TOKENS sets the window.
+          env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = window.to_s
           env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = window.to_s
           env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] = "90"
         end
@@ -186,7 +200,29 @@ module Mimic
       end
 
       def command(model_id, extra_args)
-        ["claude", "--model", model_id, *flags(model_id), *extra_args]
+        user_settings, rest = split_user_settings(extra_args)
+        ["claude", *user_settings, "--model", model_id, *flags(model_id), *rest]
+      end
+
+      # A forwarded --settings goes before mimic's, so mimic's overlay is the
+      # one Claude applies last. Anything after `--` stays where it is.
+      def split_user_settings(args)
+        separator = args.index("--") || args.length
+        head = args[0...separator]
+        user_settings = []
+        rest = []
+        index = 0
+        while index < head.length
+          arg = head[index]
+          if arg == "--settings" && index + 1 < head.length
+            user_settings.push(arg, head[index + 1])
+            index += 2
+            next
+          end
+          (arg.start_with?("--settings=") ? user_settings : rest) << arg
+          index += 1
+        end
+        [user_settings, rest + args[separator..]]
       end
 
       # A `claude` that re-applies upstream's launch flags to any invocation.

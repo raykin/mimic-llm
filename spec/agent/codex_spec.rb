@@ -102,6 +102,31 @@ RSpec.describe Mimic::Agent::Codex do
       expect(entry["max_context_window"]).to eq(4096)
     end
 
+    it "offers the freeform apply_patch tool in the model catalog" do
+      agent.launch([])
+
+      entry = JSON.parse((home / "model-catalog.json").read)["models"].first
+      expect(entry["apply_patch_tool_type"]).to eq("freeform")
+    end
+
+    it "keeps patch line endings only on a codex new enough to know the feature" do
+      agent.launch([])
+      expect((home / "unsloth_api.config.toml").read).not_to include("apply_patch_preserve_line_endings")
+
+      allow(Open3).to receive(:capture2).and_return(["codex-cli 0.148.0\n", instance_double(Process::Status, success?: true)])
+      agent.launch([])
+      profile = (home / "unsloth_api.config.toml").read
+      expect(profile).to include("features.apply_patch_preserve_line_endings = true")
+      expect(profile).to include("suppress_unstable_features_warning = true")
+    end
+
+    it "unsets inherited OpenAI and Codex credentials" do
+      agent.launch([])
+
+      expect(Mimic::Agent).to have_received(:spawn_and_wait)
+        .with(anything, hash_including("OPENAI_API_KEY" => nil, "CODEX_API_KEY" => nil, "CODEX_ACCESS_TOKEN" => nil))
+    end
+
     it "omits model catalog context window fields when context_length is nil" do
       nil_settings = settings_double(nil)
 

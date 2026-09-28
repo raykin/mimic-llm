@@ -56,6 +56,43 @@ RSpec.describe Mimic::Agent::Claude do
       overlay = JSON.parse(captured[captured.index("--settings") + 1])
       expect(overlay["permissions"]["deny"]).to eq(%w[WebSearch WebFetch])
     end
+
+    def launched_command(agent, args, version: [2, 1, 98])
+      allow(described_class).to receive(:find_binary).and_return("/usr/bin/claude")
+      allow(agent).to receive_messages(version: version, status_line: {}, extra_env: {})
+      captured = nil
+      allow(Mimic::Agent).to receive(:spawn_and_wait) do |command, _env|
+        captured = command
+        0
+      end
+      agent.launch(args)
+      captured
+    end
+
+    it "pins the local env in the overlay and blanks provider routing, which user settings would otherwise restore" do
+      command = launched_command(agent, [])
+
+      env = JSON.parse(command[command.index("--settings") + 1])["env"]
+      expect(env["ANTHROPIC_BASE_URL"]).to eq("http://x")
+      expect(env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"]).to eq("8192")
+      expect(env["CLAUDE_CODE_USE_BEDROCK"]).to eq("")
+      expect(env).not_to have_key("CLAUDE_CONFIG_DIR")
+    end
+
+    it "still passes the overlay to a claude too old for the dynamic-sections flag" do
+      command = launched_command(agent, [], version: [2, 1, 97])
+
+      expect(command).to include("--settings")
+      expect(command).not_to include(described_class::DYNAMIC_SECTIONS_FLAG)
+    end
+
+    it "moves a forwarded --settings before mimic's, so mimic's overlay wins" do
+      command = launched_command(agent, ["--settings", "mine.json", "-p", "hi", "--", "--settings=x"])
+
+      expect(command.first(3)).to eq(["claude", "--settings", "mine.json"])
+      expect(command.last(4)).to eq(["-p", "hi", "--", "--settings=x"])
+      expect(command.count("--settings")).to eq(2)
+    end
   end
 
   describe "#env" do
@@ -83,7 +120,18 @@ RSpec.describe Mimic::Agent::Claude do
       env = agent.env
 
       expect(env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"]).to eq("8192")
+      expect(env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"]).to eq("8192")
       expect(env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"]).to eq("90")
+    end
+
+    it "turns off the token-countdown reminders and unsets provider routing" do
+      allow(described_class).to receive(:find_binary).and_return(nil)
+      allow(agent).to receive(:extra_env).and_return({})
+
+      env = agent.env
+
+      expect(env["CLAUDE_CODE_TOTAL_TOKENS_REMINDER"]).to eq("off")
+      expect(env).to include("CLAUDE_CODE_USE_BEDROCK" => nil, "ANTHROPIC_UNIX_SOCKET" => nil)
     end
 
     it "omits the auto-compact window when context length is nil" do
@@ -95,11 +143,12 @@ RSpec.describe Mimic::Agent::Claude do
       env = agent.env
 
       expect(env).not_to have_key("CLAUDE_CODE_AUTO_COMPACT_WINDOW")
+      expect(env).not_to have_key("CLAUDE_CODE_MAX_CONTEXT_TOKENS")
     end
 
     it "disables the comment gate, whose judge call would evict the served model's prompt cache" do
       allow(described_class).to receive(:find_binary).and_return(nil)
-      allow(described_class).to receive(:ensure_config_dir).and_return(Pathname.new("/tmp/claude-config"))
+      allow(agent).to receive(:ensure_config_dir).and_return(Pathname.new("/tmp/claude-config"))
 
       expect(agent.env["COMMENT_GATE_OFF"]).to eq("1")
     end
@@ -174,23 +223,6 @@ RSpec.describe Mimic::Agent::Claude do
           seed = seeded(dir, { "mcpServers" => { "c4ai" => c4ai } }, servers: JSON.generate({ "c4ai" => c4ai }))
 
           expect { agent.env }.not_to(change { seed.mtime })
-        end
-      end
-
-      # The seed's own rescue would swallow a raise from here, so the reader
-      # is pinned on its own rather than only through merge_mcp_config.
-      describe ".mcp_servers" do
-        it "is empty for a missing file and for one that is not JSON" do
-          Dir.mktmpdir do |dir|
-            broken = Pathname.new(dir) / "broken.json"
-            broken.write("{ not json")
-
-            stub_const("Mimic::Paths::MCP_SERVERS_PATH", Pathname.new(dir) / "absent.json")
-            expect(described_class.mcp_servers).to eq({})
-
-            stub_const("Mimic::Paths::MCP_SERVERS_PATH", broken)
-            expect(described_class.mcp_servers).to eq({})
-          end
         end
       end
 

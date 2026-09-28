@@ -121,7 +121,7 @@ made. `engine/README.md` covers the engine namespaces specifically.
   else is vendored — `Agent::Claude` / `Agent::Codex` reimplement unsloth's
   launch recipe, and `../unsloth/` is a reference checkout, not a runtime
   dependency. Reviewing upstream for changes worth reimplementing is a periodic
-  judgement pass, run from this machine's `/review-unsloth` against an untracked
+  judgement pass, run from this machine's `/sync-unsloth-cc-codex` against an untracked
   `UPSTREAM-REVIEW.md` ledger.
 - **`Engine::LlamaEmbed` is selected by role, never by config, so it must stay
   out of `EngineCli::Registry::ENGINES`.** `Registry.for(settings)` dispatches
