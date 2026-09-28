@@ -3,7 +3,26 @@ require "socket"
 require "tmpdir"
 
 RSpec.describe Mimic::Health::Checks do
-  describe ".service" do
+  before { allow(Open3).to receive(:capture2).and_raise(Errno::ENOENT) }
+
+  def settings(port: 8080)
+    Mimic::LlmConfig::Settings.new(
+      "model" => { "path" => "/m.gguf" },
+      "llama" => { "host" => "127.0.0.1", "port" => port },
+    )
+  end
+
+  def row(name, port: 8080) = described_class.new(settings(port: port)).to_a.to_h.fetch(name)
+
+  it "lists every component in report order" do
+    allow(Mimic::Util::Probes).to receive(:get).and_raise(Errno::ECONNREFUSED)
+
+    names = described_class.new(settings).to_a.map(&:first)
+
+    expect(names).to eq(["llama.cpp", "Hermes binary", "Hermes DB", "claude-code", "Claude config dir"])
+  end
+
+  describe "the llama.cpp row" do
     around do |example|
       @server = TCPServer.new("127.0.0.1", 0)
       @thread = Thread.new { serve }
@@ -16,35 +35,35 @@ RSpec.describe Mimic::Health::Checks do
     def serve
       loop do
         client = @server.accept
-        client.gets
+        @path = client.gets.split[1]
         client.print("HTTP/1.1 #{@status} Nope\r\nContent-Length: 0\r\n\r\n")
         client.close
       end
     end
 
-    def url = "http://127.0.0.1:#{@server.addr[1]}/"
+    def llama_row = row("llama.cpp", port: @server.addr[1])
 
-    it "reports ok with the HTTP status line for a 2xx response" do
+    it "reports ok with the HTTP status line for a 2xx from the Settings' models_url" do
       @status = 200
-      result = described_class.service(url, timeout: 2)
+      result = llama_row
       expect(result.ok?).to be true
       expect(result.message).to eq("HTTP 200")
+      expect(@path).to eq("/v1/models")
     end
 
     it "reports not ok for a non-2xx response" do
       @status = 500
-      result = described_class.service(url, timeout: 2)
-      expect(result.ok?).to be false
+      expect(llama_row.ok?).to be false
     end
 
     it "returns the exception message instead of raising when the connection fails" do
-      result = described_class.service("http://127.0.0.1:1/", timeout: 1)
+      result = row("llama.cpp", port: 1)
       expect(result.ok?).to be false
       expect(result.message).not_to be_empty
     end
   end
 
-  describe "#db" do
+  describe "the Hermes DB row" do
     around do |example|
       Dir.mktmpdir do |dir|
         @db = Pathname.new(dir) / "state.db"
@@ -52,13 +71,15 @@ RSpec.describe Mimic::Health::Checks do
       end
     end
 
+    before { allow(Mimic::Util::Probes).to receive(:get).and_raise(Errno::ECONNREFUSED) }
+
     def seed(sql)
       IO.popen(["sqlite3", @db.to_s], "w") { |io| io.write(sql) }
     end
 
     def db_result
       stub_const("Mimic::Agent::Hermes::STATE_DB", @db)
-      described_class.new(Mimic::LlmConfig::Settings.new({})).send(:db)
+      row("Hermes DB")
     end
 
     it "counts active messages and total tokens" do
@@ -88,21 +109,6 @@ RSpec.describe Mimic::Health::Checks do
 
       expect(result.ok?).to be false
       expect(result.message).not_to be_empty
-    end
-  end
-
-  describe "#to_a" do
-    it "probes llama.cpp at the Settings' own models_url" do
-      settings = Mimic::LlmConfig::Settings.new(
-        "model" => { "path" => "/m.gguf" },
-        "llama" => { "host" => "127.0.0.1", "port" => 8080 },
-      )
-      allow(described_class).to receive(:service).and_return(Mimic::Result.ok("HTTP 200"))
-
-      names = described_class.new(settings).to_a.map(&:first)
-
-      expect(described_class).to have_received(:service).with(Mimic::Engine::Llama.new(settings).models_url)
-      expect(names).to eq(["llama.cpp", "Hermes binary", "Hermes DB", "claude-code", "Claude config dir"])
     end
   end
 end

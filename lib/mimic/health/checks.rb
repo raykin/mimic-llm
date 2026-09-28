@@ -14,16 +14,6 @@ module Mimic
       DB_QUERY = "SELECT (SELECT COUNT(*) FROM messages WHERE active=1)," \
                  " (SELECT COALESCE(SUM(input_tokens+output_tokens),0) FROM sessions)".freeze
 
-      class << self
-        # Probe a service endpoint.
-        def service(url, headers: {}, timeout: 5)
-          res = Util::Probes.get(url, headers: headers, timeout: timeout)
-          Result.new(ok: res.is_a?(Net::HTTPSuccess), message: "HTTP #{res.code}")
-        rescue StandardError => e
-          Result.error(e.message)
-        end
-      end
-
       def initialize(settings)
         @settings = settings
       end
@@ -31,7 +21,7 @@ module Mimic
       # [[component name, Result], ...] in report order.
       def to_a
         [
-          ["llama.cpp", self.class.service(Engine::Llama.new(@settings).models_url)],
+          ["llama.cpp", service(Engine::Llama.new(@settings).models_url)],
           ["Hermes binary", hermes_install],
           ["Hermes DB", db],
           ["claude-code", claude_code],
@@ -40,6 +30,14 @@ module Mimic
       end
 
       private
+
+      # Probe a service endpoint.
+      def service(url, headers: {}, timeout: 5)
+        res = Util::Probes.get(url, headers: headers, timeout: timeout)
+        Result.new(ok: res.is_a?(Net::HTTPSuccess), message: "HTTP #{res.code}")
+      rescue StandardError => e
+        Result.error(e.message)
+      end
 
       # Check Hermes state DB is accessible and has active sessions.
       #

@@ -14,4 +14,18 @@ require_relative "../lib/mimic/util/host"
 
 RSpec.configure do |config|
   config.before { allow(Mimic::Util::Host).to receive(:gpu_free_mib).and_return(nil) }
+
+  # Launch banners, wizard steps and cli-ui frames print as the code runs.
+  # Keep them out of the report; `output(...).to_stdout` and the specs that
+  # capture $stdout themselves swap it again inside the example.
+  config.around do |example|
+    stdout = $stdout
+    stderr = $stderr
+    $stdout = StringIO.new
+    $stderr = StringIO.new
+    example.run
+  ensure
+    $stdout = stdout
+    $stderr = stderr
+  end
 end

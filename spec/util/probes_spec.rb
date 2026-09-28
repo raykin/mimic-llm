@@ -57,109 +57,96 @@ RSpec.describe Mimic::Util::Probes do
     around do |example|
       Dir.mktmpdir do |dir|
         @dir = Pathname.new(dir)
+        @spawned = []
         example.run
+      ensure
+        @spawned.each { |pid| Process.kill("KILL", pid) rescue nil }
+        @spawned.each { |pid| Process.wait(pid) rescue nil }
       end
     end
+
+    def spawn(*argv, **opts)
+      pid = Process.spawn(*argv, **opts)
+      @spawned << pid
+      pid
+    end
+
+    def gone?(pid)
+      described_class.wait_until(attempts: 40, delay: 0.05) do
+        begin
+          Process.waitpid(pid, Process::WNOHANG)
+        rescue Errno::ECHILD
+          nil
+        end
+        !described_class.pid_alive?(pid)
+      end
+    end
+
+    def pid_file_for(pid) = (@dir / "server.pid").tap { |file| file.write(pid.to_s) }
 
     # Regression: both engines spawn with pgroup: true specifically so the
     # router's grandchild model process shares the parent's process group.
     # Sending TERM to the bare pid only kills the router, leaving the
     # VRAM-holding grandchild running and orphaned.
-    it "signals the process group, not only the recorded pid" do
-      pid_file = @dir / "llama-server.pid"
-      pid_file.write("555")
-      allow(described_class).to receive(:read_pid).and_return(555)
-      allow(Process).to receive(:getpgid).with(555).and_return(555)
-      allow(described_class).to receive(:wait_for_process_exit).and_return(true)
+    it "stops the whole process group, grandchild included" do
+      router = spawn("sh", "-c", "sleep 30 & wait", pgroup: true)
+      described_class.wait_until(attempts: 40, delay: 0.05) { described_class.descendants(router).any? }
+      model = described_class.descendants(router).first
 
-      expect(Process).to receive(:kill).with("TERM", -555)
-
-      described_class.stop_pid(pid_file, "llama-server")
+      expect(described_class.stop_pid(pid_file_for(router), "sh")).to be true
+      expect(gone?(router)).to be true
+      expect(gone?(model)).to be true
     end
 
     # The /proc fallback hands back whatever pid matched, which need not lead
     # a group. `kill(-pid)` then raises ESRCH out of `llm stop` and the server
     # keeps running -- exactly the case the fallback exists to handle.
-    it "signals the bare pid when the process is not a group leader" do
-      pid_file = @dir / "absent.pid"
-      allow(described_class).to receive(:read_pid).and_return(nil)
-      allow(described_class).to receive(:find_pid_by_cmd).and_return(556)
-      allow(Process).to receive(:getpgid).with(556).and_return(400)
-      allow(described_class).to receive(:wait_for_process_exit).and_return(true)
+    it "stops a fallback match that does not lead a process group" do
+      server = spawn("sleep", "31.123")
 
-      expect(Process).to receive(:kill).with("TERM", 556)
-
-      expect(described_class.stop_pid(pid_file, "llama-server")).to be true
+      expect(described_class.stop_pid(@dir / "absent.pid", "sleep 31.123")).to be true
+      expect(gone?(server)).to be true
     end
 
-    it "signals the bare pid when the group cannot be determined" do
-      pid_file = @dir / "absent.pid"
-      allow(described_class).to receive(:read_pid).and_return(nil)
-      allow(described_class).to receive(:find_pid_by_cmd).and_return(557)
+    it "stops the bare pid when the group cannot be determined" do
+      server = spawn("sleep", "30", pgroup: true)
       allow(Process).to receive(:getpgid).and_raise(Errno::ESRCH)
-      allow(described_class).to receive(:wait_for_process_exit).and_return(true)
 
-      expect(Process).to receive(:kill).with("TERM", 557)
-
-      described_class.stop_pid(pid_file, "llama-server")
-    end
-
-    it "waits for the stopped process and its descendants to exit" do
-      pid_file = @dir / "llama-server.pid"
-      pid_file.write("555")
-      allow(described_class).to receive(:read_pid).and_return(555)
-      allow(described_class).to receive(:descendants).with(555).and_return([556])
-      allow(Process).to receive(:getpgid).with(555).and_return(555)
-      allow(Process).to receive(:kill)
-
-      expect(described_class).to receive(:wait_for_process_exit).with([555, 556]).and_return(true)
-
-      described_class.stop_pid(pid_file, "llama-server")
+      expect(described_class.stop_pid(pid_file_for(server), "sleep")).to be true
+      expect(gone?(server)).to be true
     end
 
     it "kills the process group when graceful shutdown exceeds the bound" do
-      pid_file = @dir / "llama-server.pid"
-      pid_file.write("555")
-      allow(described_class).to receive(:read_pid).and_return(555)
-      allow(described_class).to receive(:descendants).and_return([])
-      allow(Process).to receive(:getpgid).with(555).and_return(555)
-      allow(described_class).to receive(:wait_for_process_exit).and_return(false, true)
+      stub_const("Mimic::Util::Probes::STOP_WAIT_ATTEMPTS", 2)
+      stub_const("Mimic::Util::Probes::STOP_WAIT_DELAY", 0.05)
+      server = spawn("sh", "-c", "trap '' TERM; sleep 30", pgroup: true)
+      described_class.wait_until(attempts: 40, delay: 0.05) { described_class.descendants(server).any? }
 
-      expect(Process).to receive(:kill).with("TERM", -555).ordered
-      expect(Process).to receive(:kill).with("KILL", -555).ordered
-
-      expect(described_class.stop_pid(pid_file, "llama-server")).to be true
+      expect(described_class.stop_pid(pid_file_for(server), "sh")).to be true
+      expect(gone?(server)).to be true
     end
 
     # Both servers are the same binary, so the /proc fallback cannot tell
     # them apart on argv[0] alone -- stopping the chat server must not take
     # the embedding server with it.
     it "skips excluded pids in the fallback scan" do
-      pid_file = @dir / "absent.pid"
-      allow(described_class).to receive(:read_pid).and_return(nil)
-      allow(described_class).to receive(:find_pid_by_cmd).with("llama-server", exclude: [900]).and_return(nil)
+      embed = spawn("sleep", "32.123")
 
-      expect(Process).not_to receive(:kill)
-
-      expect(described_class.stop_pid(pid_file, "llama-server", exclude: [900])).to be false
+      expect(described_class.stop_pid(@dir / "absent.pid", "sleep 32.123", exclude: [embed])).to be false
+      expect(described_class.pid_alive?(embed)).to be true
     end
 
     it "does not scan /proc at all when the fallback is off" do
-      pid_file = @dir / "absent.pid"
-      allow(described_class).to receive(:read_pid).and_return(nil)
+      server = spawn("sleep", "33.123")
 
-      expect(described_class).not_to receive(:find_pid_by_cmd)
-
-      expect(described_class.stop_pid(pid_file, "llama-server", fallback: false)).to be false
+      expect(described_class.stop_pid(@dir / "absent.pid", "sleep 33.123", fallback: false)).to be false
+      expect(described_class.pid_alive?(server)).to be true
     end
 
     it "returns false and leaves no pid file when no matching process is found" do
-      pid_file = @dir / "llama-server.pid"
-      pid_file.write("555")
-      allow(described_class).to receive(:read_pid).and_return(nil)
-      allow(described_class).to receive(:find_pid_by_cmd).and_return(nil)
+      pid_file = pid_file_for(999_999)
 
-      expect(described_class.stop_pid(pid_file, "llama-server")).to be false
+      expect(described_class.stop_pid(pid_file, "no-such-server-anywhere")).to be false
       expect(pid_file).not_to exist
     end
   end
@@ -301,19 +288,6 @@ RSpec.describe Mimic::Util::Probes do
     end
   end
 
-  describe ".argv0" do
-    it "returns nil for a pid whose /proc entry doesn't exist" do
-      expect(described_class.argv0(999_999)).to be_nil
-    end
-
-    it "returns nil instead of raising when /proc denies the read" do
-      allow(Pathname).to receive(:new).and_call_original
-      allow(Pathname).to receive(:new).with("/proc/111/cmdline").and_raise(Errno::EACCES)
-
-      expect(described_class.argv0(111)).to be_nil
-    end
-  end
-
   describe ".read_pid" do
     around do |example|
       Dir.mktmpdir do |dir|
@@ -325,6 +299,22 @@ RSpec.describe Mimic::Util::Probes do
     it "returns nil instead of raising when the pid file is a directory" do
       path = @dir / "llama-server.pid"
       path.mkpath
+
+      expect(described_class.read_pid(path, "llama-server")).to be_nil
+    end
+
+    it "returns nil for a pid with no /proc entry" do
+      path = @dir / "llama-server.pid"
+      path.write("999999")
+
+      expect(described_class.read_pid(path, "llama-server")).to be_nil
+    end
+
+    it "returns nil instead of raising when /proc denies the cmdline read" do
+      path = @dir / "llama-server.pid"
+      path.write("111")
+      allow(Pathname).to receive(:new).and_call_original
+      allow(Pathname).to receive(:new).with("/proc/111/cmdline").and_raise(Errno::EACCES)
 
       expect(described_class.read_pid(path, "llama-server")).to be_nil
     end

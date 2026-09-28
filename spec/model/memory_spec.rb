@@ -131,7 +131,7 @@ RSpec.describe Mimic::Model::Memory do
       expect(model.n_cpu_moe).to be_nil
     end
   end
-  describe "#engine / #remember_engine / #forget_engine" do
+  describe "#engine / #remember_engine" do
     include_context "a model-keyed store fixture"
 
     before { stub_const("Mimic::LlmConfig::MODEL_ENGINE_PATH", store_path) }
@@ -145,15 +145,6 @@ RSpec.describe Mimic::Model::Memory do
 
     it "recalls nothing for a model it has never seen" do
       expect(memory_for(@dir / "gone.gguf").engine).to be_nil
-    end
-
-    it "forgets a remembered engine" do
-      model = memory_for(target_path)
-      model.remember_engine("prism-llama.cpp")
-
-      model.forget_engine
-
-      expect(model.engine).to be_nil
     end
   end
 

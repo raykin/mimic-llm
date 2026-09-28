@@ -8,6 +8,19 @@ module Mimic
     LOG_LINE_PAT = /\A(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d+ (WARNING|ERROR)/
 
     class << self
+      # Verify the whole stack: what is installed, what is running, recent errors.
+      def run(settings)
+        checks = Checks.new(settings).to_a
+        errs = count_recent_errors
+
+        Ui.table(header: ["Component", "Status", "Detail"], rows: report_rows(checks, errs))
+        print_error_sample if errs[:error].positive?
+
+        checks.all? { |_, result| result.ok? } && errs[:error].zero?
+      end
+
+      private
+
       # Count WARNING/ERROR lines in the Hermes logs within window.
       def count_recent_errors(minutes: 60)
         counts = { warn: 0, error: 0 }
@@ -24,18 +37,6 @@ module Mimic
         lines.select { |line| line.include?(" ERROR ") }.last(n)
       end
 
-      # Verify the whole stack: what is installed, what is running, recent errors.
-      def run(settings)
-        checks = Checks.new(settings).to_a
-        errs = count_recent_errors
-
-        Ui.table(header: ["Component", "Status", "Detail"], rows: report_rows(checks, errs))
-        print_error_sample if errs[:error].positive?
-
-        checks.all? { |_, result| result.ok? } && errs[:error].zero?
-      end
-
-      private
       def tally_log(logpath, counts, cutoff)
         return unless logpath.exist?
 

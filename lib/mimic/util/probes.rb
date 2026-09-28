@@ -115,26 +115,6 @@ module Mimic
           found
         end
 
-        # First two cmdline args joined -- covers shebang scripts where argv[0]
-        # is the interpreter and argv[1] is the actual script path.
-        def argv0(pid)
-          raw = Pathname.new("/proc/#{pid}/cmdline").binread
-          raw.split("\x00").first(2).join(" ")
-        rescue SystemCallError
-          nil
-        end
-
-        # The comm field is parenthesised and may itself contain spaces or
-        # parentheses, so ppid is counted from the last ')' rather than by
-        # splitting the whole line.
-        def ppid(pid)
-          stat = Pathname.new("/proc/#{pid}/stat").read
-          fields = stat[(stat.rindex(")") || -1) + 1..].to_s.split
-          Integer(fields[1])
-        rescue SystemCallError, ArgumentError, TypeError
-          nil
-        end
-
         def read_pid(pid_file, expect)
           pid = Integer(pid_file.read.strip)
           a0 = argv0(pid)
@@ -215,6 +195,26 @@ module Mimic
         end
 
         private
+
+        # First two cmdline args joined -- covers shebang scripts where argv[0]
+        # is the interpreter and argv[1] is the actual script path.
+        def argv0(pid)
+          raw = Pathname.new("/proc/#{pid}/cmdline").binread
+          raw.split("\x00").first(2).join(" ")
+        rescue SystemCallError
+          nil
+        end
+
+        # The comm field is parenthesised and may itself contain spaces or
+        # parentheses, so ppid is counted from the last ')' rather than by
+        # splitting the whole line.
+        def ppid(pid)
+          stat = Pathname.new("/proc/#{pid}/stat").read
+          fields = stat[(stat.rindex(")") || -1) + 1..].to_s.split
+          Integer(fields[1])
+        rescue SystemCallError, ArgumentError, TypeError
+          nil
+        end
 
         def wait_for_process_exit(pids)
           wait_until(attempts: STOP_WAIT_ATTEMPTS, delay: STOP_WAIT_DELAY) do

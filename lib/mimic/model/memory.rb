@@ -63,7 +63,6 @@ module Mimic
       # choice from. Absent means nothing has judged this model yet.
       def engine = engine_store.fetch(@path)
       def remember_engine(value) = engine_store.write(@path, value)
-      def forget_engine = engine_store.delete(@path)
 
       # Both facts live in the tensor block, which sits behind the vocab
       # array -- reaching it costs a full KV walk per model, and the setup

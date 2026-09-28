@@ -30,67 +30,6 @@ RSpec.describe Mimic::Engine::IkLlama do
     process
   end
 
-  describe ".retry_blocker" do
-    # The retry decision is made against a log that may carry invalid bytes,
-    # so it has to survive a scrubbed tail rather than raising on one.
-    it "reads a scrubbed tail without raising" do
-      log_path = @dir / "server.log"
-      log_path.binwrite("\xFF\xFE junk\nllm_load_print_meta: n_expert     = 0\ncudaMalloc failed\n")
-
-      tail = server_process(log_path).log_tail
-      expect(tail).to be_valid_encoding
-      expect(described_class.retry_blocker(tail, 0))
-        .to eq("this model is dense, so it has no experts to offload")
-    end
-  end
-
-  describe ".meta_int" do
-    it "extracts an integer metadata value from a log tail" do
-      tail = "llm_load_print_meta: n_layer         = 48\n"
-      expect(described_class.meta_int(tail, "n_layer")).to eq(48)
-    end
-
-    it "returns nil when the key is absent" do
-      expect(described_class.meta_int("nothing here", "n_layer")).to be_nil
-    end
-  end
-
-  describe ".retry_blocker" do
-    it "names the port conflict rather than blaming VRAM when the bind failed" do
-      tail = "couldn't bind to server socket: hostname=127.0.0.1 port=8080\n"
-      expect(described_class.retry_blocker(tail, 0))
-        .to eq("port 8080 is still held by another process")
-    end
-
-    it "blocks immediately on a non-OOM failure" do
-      expect(described_class.retry_blocker("segfault", 0)).to eq("startup failed for a reason other than VRAM")
-    end
-
-    it "blocks when the model is dense (no experts)" do
-      tail = "cudaMalloc failed: out of memory\nllm_load_print_meta: n_expert        = 0\n"
-      expect(described_class.retry_blocker(tail, 0)).to eq("this model is dense, so it has no experts to offload")
-    end
-
-    it "allows another retry while under the layer ceiling" do
-      tail = "cudaMalloc failed: out of memory\nllm_load_print_meta: n_expert        = 8\n" \
-             "llm_load_print_meta: n_layer         = 48\n"
-      expect(described_class.retry_blocker(tail, 4)).to be_nil
-    end
-
-    it "blocks with a KV-specific message once every layer is offloaded and KV still doesn't fit" do
-      tail = "cudaMalloc failed: out of memory\nllm_load_print_meta: n_expert        = 8\n" \
-             "llm_load_print_meta: n_layer         = 10\n" \
-             "failed to allocate buffer for kv cache\n"
-      expect(described_class.retry_blocker(tail, 10)).to eq("the KV cache does not fit -- lower `model.context_length`")
-    end
-
-    it "blocks once the ceiling is hit without a KV marker" do
-      tail = "cudaMalloc failed: out of memory\nllm_load_print_meta: n_expert        = 8\n" \
-             "llm_load_print_meta: n_layer         = 10\n"
-      expect(described_class.retry_blocker(tail, 10)).to eq("every layer is already offloaded (ceiling 10)")
-    end
-  end
-
   describe "#find_binary" do
     it "returns the configured binary when present on disk" do
       allow(File).to receive(:file?).and_call_original
@@ -419,17 +358,50 @@ RSpec.describe Mimic::Engine::IkLlama do
       expect(Mimic::Model.new("/m.gguf").memory.n_cpu_moe).to eq(described_class::CPU_MOE_STEP)
     end
 
-    it "stops retrying and reports the blocker when the model is dense" do
-      settings = settings_for
-      stub_llama(settings, running: false, spawns: 99)
-      log = @dir / "dense.log"
-      log.write("cudaMalloc failed: out of memory\nllm_load_print_meta: n_expert        = 0\n")
-      allow(server_process(log)).to receive(:cleanup_failed)
-      allow(Mimic::Util::Probes).to receive(:wait_ready).and_return(false)
+    describe "when a failed launch cannot be rescued by offloading more" do
+      def start_failing_with(log_bytes, cached_n_cpu_moe: nil)
+        settings = settings_for
+        stub_llama(settings, running: false, spawns: 99)
+        Mimic::Model.new("/m.gguf").memory.remember_n_cpu_moe(cached_n_cpu_moe) if cached_n_cpu_moe
+        log = @dir / "failed.log"
+        log.binwrite(log_bytes)
+        allow(server_process(log)).to receive(:cleanup_failed)
+        allow(Mimic::Util::Probes).to receive(:wait_ready).and_return(false)
 
-      result = described_class.new(settings).start(remember: false)
-      expect(result.ok?).to be false
-      expect(result.message).to include("this model is dense, so it has no experts to offload")
+        result = described_class.new(settings).start(remember: false)
+        expect(result.ok?).to be false
+        result.message
+      end
+
+      # The log may carry invalid bytes, so the verdict is read from a
+      # scrubbed tail rather than raising on one.
+      it "reports a dense model, even from a log with invalid bytes" do
+        message = start_failing_with("\xFF\xFE junk\ncudaMalloc failed: out of memory\n" \
+                                     "llm_load_print_meta: n_expert        = 0\n")
+        expect(message).to include("this model is dense, so it has no experts to offload")
+      end
+
+      it "names the port conflict rather than blaming VRAM when the bind failed" do
+        message = start_failing_with("couldn't bind to server socket: hostname=127.0.0.1 port=8080\n")
+        expect(message).to include("port 8080 is still held by another process")
+      end
+
+      it "blocks immediately on a non-OOM failure" do
+        expect(start_failing_with("segfault\n")).to include("startup failed for a reason other than VRAM")
+      end
+
+      it "names the KV cache once every layer is offloaded and it still does not fit" do
+        message = start_failing_with("cudaMalloc failed: out of memory\nllm_load_print_meta: n_expert        = 8\n" \
+                                     "llm_load_print_meta: n_layer         = 10\n" \
+                                     "failed to allocate buffer for kv cache\n", cached_n_cpu_moe: 10)
+        expect(message).to include("the KV cache does not fit -- lower `model.context_length`")
+      end
+
+      it "stops once every layer is offloaded without a KV marker" do
+        message = start_failing_with("cudaMalloc failed: out of memory\nllm_load_print_meta: n_expert        = 8\n" \
+                                     "llm_load_print_meta: n_layer         = 10\n", cached_n_cpu_moe: 10)
+        expect(message).to include("every layer is already offloaded (ceiling 10)")
+      end
     end
   end
 

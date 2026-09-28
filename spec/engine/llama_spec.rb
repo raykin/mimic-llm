@@ -36,36 +36,6 @@ RSpec.describe Mimic::Engine::Llama do
     end
   end
 
-  describe "#model_loaded? (private)" do
-    # Regression: model_loaded? polls a different path ("/models") than
-    # every other call site ("/v1/models" via models_url), so it 404s
-    # against a live router and the load-wait loop always times out even
-    # after the model has actually finished loading. Its only reachable
-    # path is the load-wait loop inside #start, which is expensive to
-    # drive end-to-end in a spec -- kept as a direct private-method test
-    # per ruby-style.md's regression-pinning exception.
-    it "polls the same /v1/models endpoint as models_url, not a bare /models path" do
-      expect(Mimic::Util::Probes).to receive(:http_json)
-        .with("http://127.0.0.1:8080/v1/models")
-        .and_return({ "data" => [{ "id" => "foo", "status" => { "value" => "loaded" } }] })
-
-      expect(described_class.new(settings).send(:model_loaded?)).to be true
-    end
-
-    it "returns true when the aliased model reports status loaded" do
-      allow(Mimic::Util::Probes).to receive(:http_json)
-        .and_return({ "data" => [{ "id" => "foo", "status" => { "value" => "loaded" } }] })
-
-      expect(described_class.new(settings).send(:model_loaded?)).to be true
-    end
-
-    it "returns false when the probe comes back empty" do
-      allow(Mimic::Util::Probes).to receive(:http_json).and_return(nil)
-
-      expect(described_class.new(settings).send(:model_loaded?)).to be false
-    end
-  end
-
   describe "#find_binary" do
     it "returns the configured binary when it exists on disk" do
       allow(File).to receive(:file?).and_call_original
@@ -167,6 +137,40 @@ RSpec.describe Mimic::Engine::Llama do
       expect(result.ok?).to be false
       expect(result.message).to include("llama-server failed to start", "ggml_cuda_init: failed")
       expect(process).to have_received(:cleanup_failed).with(4242)
+    end
+
+    describe "waiting for the model to load" do
+      def start_with_models_response(response)
+        start_env
+        log_path = @dir / "server.log"
+        process = Mimic::Engine::ServerProcess.new(pid_file: @dir / "server.pid", log_file: log_path,
+                                                   proc_scan_fallback: true)
+        allow(Mimic::Engine::ServerProcess).to receive(:chat).and_return(process)
+        allow(process).to receive(:cleanup_failed)
+        allow(Mimic::Engine::Launcher).to receive(:new).and_return(instance_double(Mimic::Engine::Launcher, spawn: 4242))
+        allow(Mimic::Util::Probes).to receive(:wait_ready).and_return(true)
+        allow(Mimic::Util::Probes).to receive(:wait_until) { |**, &loaded| loaded.call }
+        allow(Mimic::Util::Probes).to receive(:http_json).and_return(response)
+
+        described_class.new(settings).start(remember: false)
+      end
+
+      # Regression: the load-wait polled "/models" while every other call
+      # site uses "/v1/models" via models_url, so it 404'd against a live
+      # router and timed out after the model had finished loading.
+      it "polls the same /v1/models endpoint as models_url" do
+        result = start_with_models_response({ "data" => [{ "id" => "foo", "status" => { "value" => "loaded" } }] })
+
+        expect(result.ok?).to be true
+        expect(Mimic::Util::Probes).to have_received(:http_json).with("http://127.0.0.1:8080/v1/models")
+      end
+
+      it "reports a failed load when the probe comes back empty" do
+        result = start_with_models_response(nil)
+
+        expect(result.ok?).to be false
+        expect(result.message).to include("model failed to load")
+      end
     end
 
     it "writes the preset before spawning, and spawns the binary it found" do

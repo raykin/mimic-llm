@@ -49,24 +49,6 @@ module Mimic
       def running? = Util::Probes.http_ok(health_url)
       def mode = @embed.mode == "auto" ? self.class.mode_for(@embed.path) : @embed.mode
 
-      def command(binary)
-        [
-          binary,
-          "-m", @embed.path,
-          "-a", @embed.model_alias,
-          "--host", @embed.host.to_s,
-          "--port", @embed.port.to_s,
-          "--ctx-size", @embed.context_length.to_s,
-          # A pooled embedding model is non-causal: a document has to fit in
-          # one ubatch or llama-server rejects it, so both batch sizes move
-          # together rather than leaving -ub at its 512 default.
-          "-b", @embed.batch_size.to_s,
-          "-ub", @embed.batch_size.to_s,
-          "-ngl", "999",
-          mode == "rerank" ? "--rerank" : "--embeddings",
-        ]
-      end
-
       # llama.cpp's own build, not whatever engine the chat server runs:
       # ik_llama.cpp is the engine for CPU-MoE offload on a big generative
       # model and has no reason to be serving a 600 MB encoder.
@@ -91,6 +73,24 @@ module Mimic
       end
 
       private
+
+      def command(binary)
+        [
+          binary,
+          "-m", @embed.path,
+          "-a", @embed.model_alias,
+          "--host", @embed.host.to_s,
+          "--port", @embed.port.to_s,
+          "--ctx-size", @embed.context_length.to_s,
+          # A pooled embedding model is non-causal: a document has to fit in
+          # one ubatch or llama-server rejects it, so both batch sizes move
+          # together rather than leaving -ub at its 512 default.
+          "-b", @embed.batch_size.to_s,
+          "-ub", @embed.batch_size.to_s,
+          "-ngl", "999",
+          mode == "rerank" ? "--rerank" : "--embeddings",
+        ]
+      end
 
       def launch(binary)
         log_offset = process.log_size

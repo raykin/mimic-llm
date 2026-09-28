@@ -17,45 +17,6 @@ RSpec.describe Mimic::Health do
 
   def stamp(minutes_ago) = (Time.now - (minutes_ago * 60)).strftime("%Y-%m-%d %H:%M:%S")
 
-  describe ".count_recent_errors" do
-    # Regression: `read(encoding: "UTF-8", invalid: :replace)` replaces
-    # nothing -- it names an external encoding, which transcodes nothing --
-    # so one truncated multibyte character in a hermes log took the whole of
-    # `mimic verify` down with an ArgumentError from the regex.
-    it "survives an invalid byte in the log" do
-      (@dir / "agent.log").binwrite("#{stamp(5)},123 ERROR truncated \xFF\n")
-
-      expect(described_class.count_recent_errors).to eq({ warn: 0, error: 1 })
-    end
-
-    it "skips a log it cannot read instead of raising" do
-      (@dir / "agent.log").write("#{stamp(5)},123 ERROR readable\n")
-      (@dir / "errors.log").write("#{stamp(5)},123 ERROR unreadable\n")
-      (@dir / "errors.log").chmod(0o000)
-
-      expect(described_class.count_recent_errors).to eq({ warn: 0, error: 1 })
-    end
-
-    # Python uses re.match, which anchors at the start of the line. A
-    # timestamp appearing mid-line is another logger's text, not a hermes
-    # record.
-    it "ignores a level that is not at the start of the line" do
-      (@dir / "agent.log").write("wrapped #{stamp(5)},123 ERROR from another logger\n")
-
-      expect(described_class.count_recent_errors).to eq({ warn: 0, error: 0 })
-    end
-
-    it "stops at the first line older than the window" do
-      (@dir / "agent.log").write([
-        "#{stamp(120)},000 ERROR old\n",
-        "#{stamp(10)},000 ERROR recent\n",
-        "#{stamp(5)},000 WARNING recent\n",
-      ].join)
-
-      expect(described_class.count_recent_errors).to eq({ warn: 1, error: 1 })
-    end
-  end
-
   describe ".run" do
     def settings
       Mimic::LlmConfig::Settings.new(
@@ -92,43 +53,69 @@ RSpec.describe Mimic::Health do
 
       expect { expect(described_class.run(settings)).to be false }.to output(/ERROR boom/).to_stdout
     end
-  end
 
-  describe ".recent_error_sample" do
-    # `run` prints each sampled line with puts; a retained "\n" prints a blank
-    # line after every error, and the 200-character truncation counts it.
-    it "returns lines without their trailing newline" do
-      (@dir / "errors.log").write([
-        "#{stamp(5)},111 ERROR first\n",
-        "#{stamp(4)},222 WARNING skipped\n",
-        "#{stamp(3)},333 ERROR second\n",
-      ].join)
+    describe "counting the Hermes logs" do
+      before { stub_checks(["llama.cpp", Mimic::Result.ok("HTTP 200")]) }
 
-      expect(described_class.recent_error_sample).to eq([
-                                                          "#{stamp(5)},111 ERROR first",
-                                                          "#{stamp(3)},333 ERROR second",
-                                                        ])
-    end
+      # Regression: `read(encoding: "UTF-8", invalid: :replace)` replaces
+      # nothing -- it names an external encoding, which transcodes nothing --
+      # so one truncated multibyte character in a hermes log took the whole of
+      # `mimic verify` down with an ArgumentError from the regex.
+      it "counts and prints an error line that holds an invalid byte" do
+        (@dir / "errors.log").binwrite("#{stamp(5)},111 ERROR truncated \xFF\n")
 
-    it "survives an invalid byte in the log" do
-      (@dir / "errors.log").binwrite("#{stamp(5)},111 ERROR truncated \xFF\n")
+        expect { expect(described_class.run(settings)).to be false }
+          .to output(/1 errors, 0 warns.*truncated �/m).to_stdout
+      end
 
-      expect(described_class.recent_error_sample.first).to end_with("truncated �")
-    end
+      # Deliberate divergence: Python guards the read in count_recent_errors
+      # but not in the sample, so an unreadable errors.log crashed `mimic
+      # verify` at the point it printed the errors it counted from agent.log.
+      it "skips a log it cannot read instead of raising" do
+        (@dir / "agent.log").write("#{stamp(5)},123 ERROR readable\n")
+        (@dir / "errors.log").write("#{stamp(5)},123 ERROR unreadable\n")
+        (@dir / "errors.log").chmod(0o000)
 
-    it "is empty when there is no errors log" do
-      expect(described_class.recent_error_sample).to eq([])
-    end
+        expect { expect(described_class.run(settings)).to be false }.to output(/1 errors, 0 warns/).to_stdout
+      end
 
-    # Deliberate divergence: Python guards the read in count_recent_errors but
-    # not here, so an unreadable errors.log crashes `mimic verify` at the point
-    # it tries to print the errors it already counted from agent.log. Same
-    # policy in both places instead.
-    it "is empty when the errors log cannot be read" do
-      (@dir / "errors.log").write("#{stamp(5)},111 ERROR first\n")
-      (@dir / "errors.log").chmod(0o000)
+      it "prints no sample when there is no errors log" do
+        (@dir / "agent.log").write("#{stamp(5)},123 ERROR only here\n")
 
-      expect(described_class.recent_error_sample).to eq([])
+        expect { described_class.run(settings) }.not_to output(/only here/).to_stdout
+      end
+
+      # Python uses re.match, which anchors at the start of the line. A
+      # timestamp appearing mid-line is another logger's text, not a hermes
+      # record.
+      it "ignores a level that is not at the start of the line" do
+        (@dir / "agent.log").write("wrapped #{stamp(5)},123 ERROR from another logger\n")
+
+        expect { expect(described_class.run(settings)).to be true }.to output.to_stdout
+      end
+
+      it "stops at the first line older than the window" do
+        (@dir / "agent.log").write([
+          "#{stamp(120)},000 ERROR old\n",
+          "#{stamp(10)},000 ERROR recent\n",
+          "#{stamp(5)},000 WARNING recent\n",
+        ].join)
+
+        expect { described_class.run(settings) }.to output(/1 errors, 1 warns/).to_stdout
+      end
+
+      # A retained "\n" prints a blank line after every sampled error, and
+      # the 200-character truncation counts it.
+      it "prints only the ERROR lines of the sample, one per line" do
+        (@dir / "errors.log").write([
+          "#{stamp(5)},111 ERROR first\n",
+          "#{stamp(4)},222 WARNING skipped\n",
+          "#{stamp(3)},333 ERROR second\n",
+        ].join)
+
+        expect { described_class.run(settings) }
+          .to output(/ERROR first\n  \S+ \S+ ERROR second\n\z/).to_stdout
+      end
     end
   end
 end

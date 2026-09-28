@@ -28,34 +28,6 @@ module Mimic
       # have fit. Recoverable: the same argv minus --spec-type starts.
       MTP_OOM_MARKER = "failed to create MTP context"
 
-      class << self
-        def meta_int(tail, key)
-          match = tail.match(/^llm_load_print_meta: #{Regexp.escape(key)}\s*= (\d+)$/)
-          match && match[1].to_i
-        end
-
-        # Why bumping --n-cpu-moe cannot rescue this failure, if it can't.
-        #
-        # The flag only relocates MoE expert tensors, so it is useless on a
-        # dense model and cannot shrink a KV cache. Retrying regardless just
-        # reloads the weights until the ceiling, which on a dense model means
-        # every attempt is byte-identical to the one that already failed.
-        def retry_blocker(tail, n_cpu_moe)
-          bind_failure = tail[/#{Regexp.escape(BIND_MARKER)}.*?port=(\d+)/m, 1]
-          return "port #{bind_failure} is still held by another process" if bind_failure
-          return "startup failed for a reason other than VRAM" unless OOM_MARKERS.any? { |m| tail.include?(m) }
-          return "this model is dense, so it has no experts to offload" if meta_int(tail, "n_expert") == 0
-
-          n_layer = meta_int(tail, "n_layer")
-          ceiling = [CPU_MOE_MAX, n_layer || CPU_MOE_MAX].min
-          return nil if n_cpu_moe < ceiling
-
-          return "the KV cache does not fit -- lower `model.context_length`" if tail.include?(KV_OOM_MARKER)
-
-          "every layer is already offloaded (ceiling #{ceiling})"
-        end
-      end
-
       # Every flag mimic sets, in argv order: `build_command` spells them from
       # here and `ServerStatus` reads a launched argv back through the same
       # table. Valueless switches stay out of it -- there is nothing to read.
@@ -153,16 +125,42 @@ module Mimic
             next
           end
 
-          blocker = self.class.retry_blocker(tail, n_cpu_moe)
+          blocker = retry_blocker(tail, n_cpu_moe)
           if blocker
             return Result.error("ik_llama server failed to start -- #{blocker}. See #{process.log_file}\n#{process.last_lines(tail)}")
           end
-          ceiling = [CPU_MOE_MAX, self.class.meta_int(tail, "n_layer") || CPU_MOE_MAX].min
+          ceiling = [CPU_MOE_MAX, meta_int(tail, "n_layer") || CPU_MOE_MAX].min
           n_cpu_moe = [n_cpu_moe + CPU_MOE_STEP, ceiling].min
         end
       end
 
       private
+
+      def meta_int(tail, key)
+        match = tail.match(/^llm_load_print_meta: #{Regexp.escape(key)}\s*= (\d+)$/)
+        match && match[1].to_i
+      end
+
+      # Why bumping --n-cpu-moe cannot rescue this failure, if it can't.
+      #
+      # The flag only relocates MoE expert tensors, so it is useless on a
+      # dense model and cannot shrink a KV cache. Retrying regardless just
+      # reloads the weights until the ceiling, which on a dense model means
+      # every attempt is byte-identical to the one that already failed.
+      def retry_blocker(tail, n_cpu_moe)
+        bind_failure = tail[/#{Regexp.escape(BIND_MARKER)}.*?port=(\d+)/m, 1]
+        return "port #{bind_failure} is still held by another process" if bind_failure
+        return "startup failed for a reason other than VRAM" unless OOM_MARKERS.any? { |m| tail.include?(m) }
+        return "this model is dense, so it has no experts to offload" if meta_int(tail, "n_expert") == 0
+
+        n_layer = meta_int(tail, "n_layer")
+        ceiling = [CPU_MOE_MAX, n_layer || CPU_MOE_MAX].min
+        return nil if n_cpu_moe < ceiling
+
+        return "the KV cache does not fit -- lower `model.context_length`" if tail.include?(KV_OOM_MARKER)
+
+        "every layer is already offloaded (ceiling #{ceiling})"
+      end
 
       # The retry loop below only reacts to a launch that fails outright, but
       # an over-committed context loads and then dies once the KV cache

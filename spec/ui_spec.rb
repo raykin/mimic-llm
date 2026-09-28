@@ -3,7 +3,9 @@ require_relative "../lib/mimic/ui"
 RSpec.describe Mimic::Ui::Prompt do
   # cli-ui hardcodes the arrow/return glyphs into the instruction line it
   # prints with the question. The return one renders as a box in this
-  # terminal, so it is spelled out instead.
+  # terminal, so it is spelled out instead. The only public path to
+  # puts_question is cli-ui's interactive select -- kept as a direct
+  # private-method test per ruby-style.md's regression-pinning exception.
   describe "the select instructions" do
     it "spells out the keys that select instead of drawing one" do
       expect { CLI::UI::Prompt.send(:puts_question, "Engine: (Choose with ↑ ↓ ⏎)") }

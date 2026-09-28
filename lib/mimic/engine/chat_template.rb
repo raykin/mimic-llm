@@ -107,6 +107,25 @@ module Mimic
 
       def guarded? = source.to_s.include?("raise_exception")
 
+      # Hand-written first: a file the user wrote is a decision, and mimic's
+      # rules do not get to overrule it.
+      def override_path
+        [hand_written, generated].find(&:file?)
+      end
+
+      def install
+        return nil if hand_written.file?
+
+        text = sanitized
+        return nil if text.nil?
+
+        generated.dirname.mkpath
+        generated.write(text.end_with?("\n") ? text : "#{text}\n")
+        generated
+      end
+
+      private
+
       # The rewritten template, or nil when no guard in it has a rule.
       #
       # Per guard, not per template: a guard mimic has no rule for is left
@@ -128,25 +147,6 @@ module Mimic
         end
         rewrote ? rewritten : nil
       end
-
-      # Hand-written first: a file the user wrote is a decision, and mimic's
-      # rules do not get to overrule it.
-      def override_path
-        [hand_written, generated].find(&:file?)
-      end
-
-      def install
-        return nil if hand_written.file?
-
-        text = sanitized
-        return nil if text.nil?
-
-        generated.dirname.mkpath
-        generated.write(text.end_with?("\n") ? text : "#{text}\n")
-        generated
-      end
-
-      private
 
       def hand_written = Paths::CHAT_TEMPLATES_DIR / "#{@model_alias}.jinja"
       def generated = Paths::GENERATED_TEMPLATES_DIR / "#{@model_alias}.jinja"

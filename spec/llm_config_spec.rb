@@ -3,10 +3,6 @@ require "tmpdir"
 require "fileutils"
 
 RSpec.describe Mimic::LlmConfig do
-  it "keeps the legacy relocation off the public surface" do
-    expect { described_class.migrate_legacy }.to raise_error(NoMethodError)
-  end
-
   describe ".load" do
     around do |example|
       Dir.mktmpdir do |dir|

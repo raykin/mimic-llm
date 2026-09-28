@@ -86,52 +86,6 @@ RSpec.describe Mimic::Engine::ChatTemplate do
     end
   end
 
-  describe "#sanitized" do
-    it "leaves no raise_exception call behind" do
-      expect(build(QWEN_PREAMBLE).sanitized).not_to include("raise_exception")
-    end
-
-    it "renders a late system message as its own turn instead of throwing" do
-      expect(build(QWEN_PREAMBLE).sanitized)
-        .to include("{%- if not loop.first %}\n            {{- '<|im_start|>system\\n' + content + '<|im_end|>' + '\\n' }}")
-    end
-
-    it "renders an unrecognised role as a user turn instead of dropping it" do
-      expect(build(QWEN_PREAMBLE).sanitized).to include("{{- '<|im_start|>user\\n' + content + '<|im_end|>' + '\\n' }}")
-    end
-
-    it "falls back to item text for an unrecognised content item" do
-      expect(build(QWEN_PREAMBLE).sanitized).to include("{{- item.text if item.text is defined else '' }}")
-    end
-
-    # Qwen3.8-27B ships ten guards; three are about tool-call argument shapes
-    # mimic has no opinion on. All-or-nothing threw away the system-message
-    # repair over those three and left the server 500ing on every Claude Code
-    # <system-reminder>.
-    it "repairs the guards it knows and leaves the rest standing" do
-      template = "#{QWEN_PREAMBLE}{%- if bad %}{{- raise_exception('Tool call is missing a function name.') }}{%- endif %}"
-
-      sanitized = build(template).sanitized
-
-      expect(sanitized).to include("{{- '<|im_start|>system\\n' + content + '<|im_end|>' + '\\n' }}")
-      expect(sanitized).to include("raise_exception('Tool call is missing a function name.')")
-    end
-
-    it "refuses a guard message no rule covers" do
-      template = "{%- if x %}{{- raise_exception('Some brand new guard.') }}{%- endif %}"
-      expect(build(template).sanitized).to be_nil
-    end
-
-    it "refuses a rendering rule when the template lacks the tokens it would emit" do
-      template = "{%- for m in messages %}{{- raise_exception('System message must be at the beginning.') }}{%- endfor %}"
-      expect(build(template).sanitized).to be_nil
-    end
-
-    it "is nil for an unguarded template" do
-      expect(build("{{ messages[0].content }}").sanitized).to be_nil
-    end
-  end
-
   describe "#install" do
     it "writes the sanitized template under the generated directory" do
       written = build(QWEN_PREAMBLE).install
@@ -160,6 +114,46 @@ RSpec.describe Mimic::Engine::ChatTemplate do
 
       build(QWEN_PREAMBLE).install
       expect(generated.read).to include("<|im_start|>user")
+    end
+  end
+
+  describe "#install rewriting the guards" do
+    def installed(template) = build(template).install&.read
+
+    it "renders a late system message as its own turn instead of throwing" do
+      expect(installed(QWEN_PREAMBLE))
+        .to include("{%- if not loop.first %}\n            {{- '<|im_start|>system\\n' + content + '<|im_end|>' + '\\n' }}")
+    end
+
+    it "renders an unrecognised role as a user turn instead of dropping it" do
+      expect(installed(QWEN_PREAMBLE)).to include("{{- '<|im_start|>user\\n' + content + '<|im_end|>' + '\\n' }}")
+    end
+
+    it "falls back to item text for an unrecognised content item" do
+      expect(installed(QWEN_PREAMBLE)).to include("{{- item.text if item.text is defined else '' }}")
+    end
+
+    # Qwen3.8-27B ships ten guards; three are about tool-call argument shapes
+    # mimic has no opinion on. All-or-nothing threw away the system-message
+    # repair over those three and left the server 500ing on every Claude Code
+    # <system-reminder>.
+    it "repairs the guards it knows and leaves the rest standing" do
+      template = "#{QWEN_PREAMBLE}{%- if bad %}{{- raise_exception('Tool call is missing a function name.') }}{%- endif %}"
+
+      sanitized = installed(template)
+
+      expect(sanitized).to include("{{- '<|im_start|>system\\n' + content + '<|im_end|>' + '\\n' }}")
+      expect(sanitized).to include("raise_exception('Tool call is missing a function name.')")
+    end
+
+    it "refuses a guard message no rule covers" do
+      template = "{%- if x %}{{- raise_exception('Some brand new guard.') }}{%- endif %}"
+      expect(installed(template)).to be_nil
+    end
+
+    it "refuses a rendering rule when the template lacks the tokens it would emit" do
+      template = "{%- for m in messages %}{{- raise_exception('System message must be at the beginning.') }}{%- endfor %}"
+      expect(installed(template)).to be_nil
     end
   end
 
