@@ -62,7 +62,7 @@ module Mimic
         end
 
         def missing_binary(name)
-          puts Ui.red("no #{name} llama-server built -- run `llm update`")
+          puts Ui.red("no #{name} llama-server built -- run `llm engines update`")
           false
         end
 

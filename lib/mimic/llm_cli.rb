@@ -1,5 +1,5 @@
 require_relative "llm_cli/base"
 require_relative "llm_cli/embed"
 require_relative "llm_cli/paths"
-require_relative "llm_cli/update"
+require_relative "llm_cli/engines"
 require_relative "llm_cli/root"

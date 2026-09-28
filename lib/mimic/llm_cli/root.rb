@@ -2,7 +2,7 @@ require_relative "../ui"
 require_relative "base"
 require_relative "embed"
 require_relative "paths"
-require_relative "update"
+require_relative "engines"
 require_relative "wizard/parallel"
 require_relative "../engine_cli"
 require_relative "../llm_config"
@@ -19,7 +19,7 @@ require_relative "../engine/llama_embed"
 # LLM CLI -- owns llama.cpp / ik_llama.cpp management.
 #
 # Carved out of `mimic setup` / `start` / `restart`. Takes:
-#   start/stop/restart/status/update + wizard steps 1-5 (system check, engine,
+#   start/stop/restart/status/engines + wizard steps 1-5 (system check, engine,
 #   binary, model, context preset).
 module Mimic
   module LlmCli
@@ -79,15 +79,15 @@ module Mimic
       # of the package, so this directory is absent in an installed gem and the
       # commands register only in a checkout.
       if Mimic::Paths.dev_build?
-        desc "debug SUBCOMMAND", "run local engine integration checks"
+        desc "debug SUBCOMMAND", "run local engine integration checks", hide: true
         subcommand "debug", Dev::Debug
 
         desc "quality SUBCOMMAND", "score every model in the library against the local quality harness"
         subcommand "quality", Dev::Quality::Command
       end
 
-      desc "update SUBCOMMAND", "check for updates and rebuild"
-      subcommand "update", Update
+      desc "engines SUBCOMMAND", "list and update the inference engines"
+      subcommand "engines", Engines
 
       # `diffusion` (DiffusionGemma, unmerged llama.cpp PR #24423) is
       # deliberately not exposed as a Thor command -- it's an experiment, not

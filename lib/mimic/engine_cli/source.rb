@@ -13,6 +13,16 @@ module Mimic
       BASE_BUILD_FLAGS = ["-DCMAKE_BUILD_TYPE=Release"].freeze
 
       class << self
+        def local_status(name)
+          repo = Registry.repo(name)
+          return nil unless (repo / ".git").exist?
+
+          commit = git(repo, "rev-parse", "HEAD")
+          return nil if commit.empty?
+
+          { commit: commit[0, 9], dirty: !git(repo, "status", "--porcelain").empty? }
+        end
+
         def build_command(name, ref: nil)
           repo = Registry.repo(name)
           checkout = ref ? "git checkout #{ref}" : "git pull --ff-only"
@@ -25,7 +35,7 @@ module Mimic
         # Fetch and report how far behind upstream the engine checkout is.
         def status(name)
           repo = Registry.repo(name)
-          return nil unless (repo / ".git").directory?
+          return nil unless (repo / ".git").exist?
 
           branch = Registry.branch(name)
           Open3.capture2("git", "-C", repo.to_s, "fetch", "--quiet", "origin", branch)

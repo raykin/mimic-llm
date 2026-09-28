@@ -1,6 +1,6 @@
 # mimic-llm
 
-`llm` manages a local llama.cpp / ik_llama.cpp server. `mimic` launches Claude
+`llm` manages local llama.cpp, ik_llama.cpp, and PrismML llama.cpp servers. `mimic` launches Claude
 Code or Codex against it, so a local model answers instead of a hosted one.
 
 ## Requirements
@@ -49,6 +49,10 @@ Claude Code, answered by your own model. `mimic codex` does the same for Codex.
 To change anything later: `llm setup` again, or `llm config` for one value,
 then `llm restart`.
 
+`llm engines` lists all three engines with their source, branch, checkout,
+revision, and binary. `llm engines update` fetches all three and rebuilds any
+that are behind; restart the server to use a rebuilt binary.
+
 If something else already owns `llm` on your `PATH` (the python `llm` CLI, most
 often), the gem installs `lllm` as the same program under a free name.
 
@@ -78,9 +82,9 @@ other way whose GGUF header names no repo either.
 **Engine binary.** Each engine has its own ordered resolution list — for
 llama.cpp: `llama-server` on `PATH`, then its checkout at
 `~/.llm/llama.cpp/build/bin/llama-server`, then `~/.local/bin/llama-server`.
-ik_llama.cpp prefers its own build over `PATH`, and prism-llama.cpp accepts
-only its own, since its fork reads ternary weights no upstream build
-understands. `llm setup` clones and builds into `~/.llm`.
+ik_llama.cpp prefers its own build over `PATH`. The current
+`prism-v7-llama.cpp` accepts only its own build, since its ternary formats
+need Prism kernels. `llm setup` clones and builds into `~/.llm`.
 
 **Client configs.** `llm sync` pushes the active model alias and context length
 into whichever of these already exist, and skips the rest:

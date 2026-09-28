@@ -33,6 +33,12 @@ RSpec.describe Mimic::LlmCli::Root do
       expect { described_class.start(["setup"]) }
         .to raise_error(SystemExit) { |error| expect(error.status).to eq(130) }
     end
+
+    it "keeps the development switch diagnostic callable but out of root help" do
+      expect { described_class.start(["-h"]) }.not_to output(/debug SUBCOMMAND/).to_stdout
+      expect { described_class.start(["debug", "help", "switch"]) }
+        .to output(/Usage:\s+\S+ debug switch/).to_stdout
+    end
   end
 
   describe "#start" do

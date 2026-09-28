@@ -22,7 +22,7 @@ module Mimic
         return puts Ui.green("Rebuild complete.") if failed.empty?
 
         puts Ui.red("failed: #{failed.map(&:first).join(', ')}")
-        puts "`llm update engines --rollback <engine>` rebuilds the last-good commit."
+        puts "`llm engines update --rollback <engine>` rebuilds the last-good commit."
       end
 
       def rollback(name)
