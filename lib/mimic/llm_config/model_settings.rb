@@ -23,6 +23,14 @@ module Mimic
       # it cannot render.
       def reasoning = section.fetch("reasoning", "auto")
 
+      # The level picked in `llm setup`, or nil -- which leaves the chat
+      # template's own default in charge. Thinking off has no level.
+      def reasoning_effort
+        return nil if reasoning == "off"
+
+        @pending_effort_set ? @pending_effort : file.memory.effort
+      end
+
       def sampling = Sampling.new(file.memory.sampling_for(reasoning: reasoning))
 
       def file
@@ -55,8 +63,14 @@ module Mimic
         @pending_mmproj = value
       end
 
+      def reasoning_effort=(value)
+        @pending_effort_set = true
+        @pending_effort = value
+      end
+
       def save
         file.memory.mmproj = @pending_mmproj if @pending_mmproj_set
+        file.memory.effort = @pending_effort if @pending_effort_set
       end
 
       private

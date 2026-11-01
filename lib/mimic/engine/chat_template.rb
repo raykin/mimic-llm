@@ -26,6 +26,21 @@ module Mimic
 
       NOOP = "{{- '' }}".freeze
 
+      EFFORT_DEFAULT = /reasoning_effort\s*\|\s*default\(\s*['"]([\w-]+)['"]/
+      EFFORT_FALLBACK = /set\s+reasoning_effort\s*=\s*['"]([\w-]+)['"]/
+      EFFORT_CHOICES = /reasoning_effort\s+not\s+in\s+[(\[]([^)\]]*)[)\]]/
+      EFFORT_COMPARE = /reasoning_effort\s*==\s*['"]([\w-]+)['"]/
+      QUOTED = /['"]([\w-]+)['"]/
+
+      # gpt-oss's harmony template prints reasoning_effort without listing
+      # the values; these are the ones the format defines.
+      HARMONY_CHANNEL = "<|channel|>".freeze
+      HARMONY_EFFORTS = %w[low medium high].freeze
+
+      # llama.cpp's --reasoning auto renders the template and asks its format
+      # handler; these are the markers those handlers turn thinking on for.
+      THINKING_MARKERS = ["enable_thinking", "<think>", "[THINK]", HARMONY_CHANNEL].freeze
+
       Rule = Struct.new(:match, :replacement, :requires, keyword_init: true)
 
       RULES = [
@@ -107,6 +122,28 @@ module Mimic
 
       def guarded? = source.to_s.include?("raise_exception")
 
+      # The reasoning_effort values the served template accepts, in its own
+      # order: an override when one exists, the GGUF's template otherwise.
+      # Fewer than two means there is nothing to choose between.
+      def effort_levels
+        text = served_source.to_s
+        listed = text[EFFORT_CHOICES, 1]
+        levels = listed ? listed.scan(QUOTED).flatten : text.scan(EFFORT_COMPARE).flatten
+        levels = HARMONY_EFFORTS if levels.empty? && harmony?(text)
+        levels = (levels + [default_effort].compact).uniq
+        levels.size < 2 ? [] : levels
+      end
+
+      def default_effort
+        text = served_source.to_s
+        text[EFFORT_DEFAULT, 1] || text[EFFORT_FALLBACK, 1]
+      end
+
+      def thinks?
+        text = served_source.to_s
+        THINKING_MARKERS.any? { |marker| text.include?(marker) }
+      end
+
       # Hand-written first: a file the user wrote is a decision, and mimic's
       # rules do not get to overrule it.
       def override_path
@@ -150,6 +187,13 @@ module Mimic
 
       def hand_written = Paths::CHAT_TEMPLATES_DIR / "#{@model_alias}.jinja"
       def generated = Paths::GENERATED_TEMPLATES_DIR / "#{@model_alias}.jinja"
+
+      def served_source
+        override = override_path
+        override ? override.read : source
+      end
+
+      def harmony?(text) = text.include?(HARMONY_CHANNEL) && text.include?("reasoning_effort")
 
       def rule_for(message)
         rule = RULES.find { |r| r.match.match?(message) }

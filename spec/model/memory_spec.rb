@@ -170,6 +170,28 @@ RSpec.describe Mimic::Model::Memory do
     end
   end
 
+  describe "#effort / #effort=" do
+    include_context "a model-keyed store fixture"
+
+    before { stub_const("Mimic::LlmConfig::MODEL_EFFORT_PATH", store_path) }
+
+    def store_path = @dir / ".llm/model-effort.json"
+    def stored_value = "low"
+    def remember_entry(path) = memory_for(path).effort = stored_value
+    def recall_entry(path) = memory_for(path).effort
+
+    it_behaves_like "a store keyed by the resolved model path"
+
+    it "drops the entry when the level is cleared" do
+      memory = memory_for(target_path)
+      memory.effort = stored_value
+
+      memory.effort = nil
+
+      expect(JSON.parse(store_path.read)).to eq({})
+    end
+  end
+
   describe "#ternary_packing" do
     around do |example|
       Dir.mktmpdir do |dir|

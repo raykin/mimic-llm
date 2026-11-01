@@ -37,7 +37,7 @@ module Mimic
 
         attr_reader :config
 
-        def initialize(config, total: 6, cli_name: "llm", prompt: Ui::Prompt.new)
+        def initialize(config, total: 8, cli_name: "llm", prompt: Ui::Prompt.new)
           @config = config
           @total = total
           @cli_name = cli_name
@@ -117,6 +117,21 @@ module Mimic
           step("Reasoning")
           wanted = @prompt.yes?("Let the model think before it answers?", default: true)
           @config.model.reasoning = wanted ? "auto" : "off"
+          @config
+        end
+
+        def choose_effort
+          step("Thinking level")
+          template = Engine::ChatTemplate.new(@config.model.path, model_alias: @config.model.name)
+          levels = template.effort_levels
+          if @config.model.reasoning == "off" || levels.empty?
+            @config.model.reasoning_effort = nil
+            puts "  #{@config.model.reasoning == 'off' ? 'thinking is off' : 'the chat template has no levels'}"
+            return @config
+          end
+
+          @config.model.reasoning_effort = @prompt.select("How hard should the model think?", levels,
+                                                          default: template.default_effort)
           @config
         end
 

@@ -110,7 +110,66 @@ RSpec.describe Mimic::Model do
     end
   end
 
+  def write_drafter(path, arch: "gemma4")
+    GgufWriter.write(path, { "general.architecture" => "#{arch}-assistant", "general.type" => "model" })
+  end
+
+  def write_target(path, arch: "gemma4")
+    GgufWriter.write(path, { "general.architecture" => arch })
+  end
+
+  describe ".drafter_for" do
+    it "pairs the drafter beside the model, whatever it's named" do
+      in_tmp do |root|
+        model = root / "gemma-4-31B-it-Q4_K_S.gguf"
+        drafter = root / "mtp-gemma-4-31B-it.gguf"
+        write_target(model)
+        write_drafter(drafter)
+
+        expect(described_class.drafter_for(model)).to eq(drafter)
+      end
+    end
+
+    it "ignores a drafter built for another architecture" do
+      in_tmp do |root|
+        model = root / "qwen-Q4_K_M.gguf"
+        write_target(model, arch: "qwen3")
+        write_drafter(root / "mtp-gemma.gguf")
+
+        expect(described_class.drafter_for(model)).to be_nil
+      end
+    end
+
+    it "prefers the stem-matching drafter when a directory holds several" do
+      in_tmp do |root|
+        model = root / "gemma-4-31B-it-Q4_K_S.gguf"
+        write_target(model)
+        [root / "mtp-gemma-4-26B-it.gguf", root / "mtp-gemma-4-31B-it.gguf"].each { |p| write_drafter(p) }
+
+        expect(described_class.drafter_for(model)).to eq(root / "mtp-gemma-4-31B-it.gguf")
+      end
+    end
+
+    it "returns nil when the model file is gone" do
+      expect(described_class.drafter_for(Pathname.new("/nowhere/model.gguf"))).to be_nil
+    end
+  end
+
   describe ".pair" do
+    it "drops drafters from the list and attaches them to their model" do
+      in_tmp do |root|
+        model = root / "gemma-4-31B-it-Q4_K_S.gguf"
+        drafter = root / "mtp-gemma-4-31B-it.gguf"
+        write_target(model)
+        write_drafter(drafter)
+
+        paired = described_class.pair([[model, root], [drafter, root]])
+
+        expect(paired.map(&:path)).to eq([model])
+        expect(paired.first.drafter).to eq(drafter)
+      end
+    end
+
     it "drops projectors from the list and attaches them to their model" do
       in_tmp do |root|
         model = root / "model-Q4_K_M.gguf"

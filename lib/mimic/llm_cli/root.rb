@@ -53,6 +53,20 @@ module Mimic
         start
       end
 
+      desc "unload", "unload the chat model to free its VRAM; llama-server loads it again on the next request"
+      method_option :force, type: :boolean, desc: "unload even while the model is answering a request"
+      def unload
+        cfg = LlmConfig.load
+        return report(Result.error("ik_llama.cpp has no router -- use `llm stop`")) if cfg.llama.ik?
+
+        router = Engine::Router.new(cfg.llama.base_url)
+        children = router.running
+        return report(Result.error("llama-server is not answering on #{cfg.llama.base_url}")) if children.nil?
+        return puts("no model loaded") if children.empty?
+
+        report(unload_children(router, children))
+      end
+
       desc "status", "llama-server status"
       def status
         EngineCli::Status.new(LlmConfig.load).print
@@ -154,6 +168,7 @@ module Mimic
         wizard.choose_mmproj
         wizard.choose_context
         wizard.choose_reasoning
+        wizard.choose_effort
 
         cfg.save
         cfg.forget_sampling
@@ -175,6 +190,18 @@ module Mimic
           "Agents synced: #{synced.empty? ? 'none found' : synced.join(', ')}",
           title: "Setup complete"
         )
+      end
+
+      def unload_children(router, children)
+        ids = children.map(&:id)
+        busy = children.find { |child| router.busy?(child) } unless options[:force]
+        return Result.error("#{busy.id} is answering a request -- rerun with --force to cut it off") if busy
+
+        refused = ids.reject { |id| router.unload(id) }
+        return Result.error("router refused to unload #{refused.join(', ')}") if refused.any?
+        return Result.error("#{ids.join(', ')} still running after 30 s") unless router.wait_stopped(ids)
+
+        Result.ok("unloaded #{ids.join(', ')} -- GPU free: #{Util::Host.gpu_free_mib || '?'} MiB")
       end
 
       def wait_for_release(cfg, action)

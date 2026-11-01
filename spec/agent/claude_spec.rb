@@ -86,11 +86,51 @@ RSpec.describe Mimic::Agent::Claude do
       expect(command).not_to include(described_class::DYNAMIC_SECTIONS_FLAG)
     end
 
-    it "moves a forwarded --settings before mimic's, so mimic's overlay wins" do
-      command = launched_command(agent, ["--settings", "mine.json", "-p", "hi", "--", "--settings=x"])
+    it "blanks apiKeyHelper, which would send a user's cloud key to llama-server" do
+      command = launched_command(agent, [])
 
-      expect(command.first(3)).to eq(["claude", "--settings", "mine.json"])
-      expect(command.last(4)).to eq(["-p", "hi", "--", "--settings=x"])
+      expect(JSON.parse(command[command.index("--settings") + 1])["apiKeyHelper"]).to eq("")
+    end
+
+    # Claude keeps only the last --settings, so a forwarded one passed on its own is dropped.
+    it "merges a forwarded --settings into mimic's overlay, under mimic's own keys" do
+      Dir.mktmpdir do |dir|
+        file = Pathname.new(dir) / "mine.json"
+        file.write(JSON.generate({ "model" => "x", "permissions" => { "allow" => ["Bash(ls)"] } }))
+        inline = JSON.generate({ "env" => { "FOO" => "1", "ANTHROPIC_BASE_URL" => "https://cloud" }, "theme" => "dark" })
+
+        command = launched_command(agent, ["--settings", file.to_s, "-p", "hi", "--settings=#{inline}", "--", "--settings=x"])
+
+        expect(command.count("--settings")).to eq(1)
+        expect(command.last(4)).to eq(["-p", "hi", "--", "--settings=x"])
+        overlay = JSON.parse(command[command.index("--settings") + 1])
+        expect(overlay).to include("theme" => "dark", "model" => "x", "availableModels" => ["my-model"])
+        expect(overlay["env"]).to include("FOO" => "1", "ANTHROPIC_BASE_URL" => "http://x")
+        expect(overlay["permissions"]).to include("allow" => ["Bash(ls)"], "deny" => %w[WebSearch WebFetch])
+      end
+    end
+
+    it "keeps a forwarded --settings' own deny and ask lists beside mimic's" do
+      user = JSON.generate({ "permissions" => { "deny" => ["Bash(rm *)", "WebFetch"], "ask" => ["Edit"] } })
+
+      command = launched_command(agent, ["--settings", user])
+
+      permissions = JSON.parse(command[command.index("--settings") + 1])["permissions"]
+      expect(permissions["deny"]).to contain_exactly("Bash(rm *)", "WebSearch", "WebFetch")
+      expect(permissions["ask"]).to contain_exactly("Edit", "Task", "Agent")
+    end
+
+    it "puts an unreadable forwarded --settings before mimic's, so mimic's overlay still applies" do
+      command = launched_command(agent, ["--settings", "/nonexistent/mine.json", "-p", "hi"])
+
+      expect(command.first(3)).to eq(["claude", "--settings", "/nonexistent/mine.json"])
+      expect(command.count("--settings")).to eq(2)
+      expect(JSON.parse(command[command.rindex("--settings") + 1])["availableModels"]).to eq(["my-model"])
+    end
+
+    it "keeps the old order when a forwarded --settings is JSON of the wrong shape" do
+      command = launched_command(agent, ["--settings", JSON.generate({ "env" => "nope" })])
+
       expect(command.count("--settings")).to eq(2)
     end
   end
@@ -113,15 +153,42 @@ RSpec.describe Mimic::Agent::Claude do
       end
     end
 
-    it "sets the auto-compact window when a context length is known" do
+    it "sets the auto-compact window when a context length of at least 100k is known" do
+      agent = described_class.new(settings_double(131_072))
       allow(described_class).to receive(:find_binary).and_return(nil)
       allow(agent).to receive(:extra_env).and_return({})
 
       env = agent.env
 
-      expect(env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"]).to eq("8192")
-      expect(env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"]).to eq("8192")
+      expect(env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"]).to eq("131072")
+      expect(env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"]).to eq("131072")
       expect(env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"]).to eq("90")
+      expect(env).not_to have_key("CLAUDE_CODE_MAX_OUTPUT_TOKENS")
+    end
+
+    it "blanks the auto-compact window below 100k, which claude ignores and warns about" do
+      allow(described_class).to receive(:find_binary).and_return(nil)
+      allow(agent).to receive(:extra_env).and_return({})
+
+      env = agent.env
+
+      expect(env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"]).to eq("")
+      expect(env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"]).to eq("8192")
+    end
+
+    it "caps output at a quarter of a window under 80k, so compaction leaves room for the conversation" do
+      allow(described_class).to receive(:find_binary).and_return(nil)
+      allow(agent).to receive(:extra_env).and_return({})
+
+      expect(agent.env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"]).to eq("2048")
+    end
+
+    it "leaves claude's own output cap alone from an 80k window up" do
+      agent = described_class.new(settings_double(80_000))
+      allow(described_class).to receive(:find_binary).and_return(nil)
+      allow(agent).to receive(:extra_env).and_return({})
+
+      expect(agent.env).not_to have_key("CLAUDE_CODE_MAX_OUTPUT_TOKENS")
     end
 
     it "turns off the token-countdown reminders and unsets provider routing" do

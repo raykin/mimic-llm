@@ -66,7 +66,7 @@ RSpec.describe Mimic::LlmCli::Root do
   describe "#setup" do
     def stub_wizard(settings)
       wizard = instance_double(Mimic::LlmCli::Wizard::Setup, config: settings)
-      %i[system_check choose_model choose_mmproj choose_context choose_reasoning].each do |step|
+      %i[system_check choose_model choose_mmproj choose_context choose_reasoning choose_effort].each do |step|
         allow(wizard).to receive(step)
       end
       allow(wizard).to receive_messages(choose_engine: "llama.cpp", ensure_binary: nil)
@@ -201,6 +201,75 @@ RSpec.describe Mimic::LlmCli::Root do
         expect { cli.restart }.to output(/still holds 127\.0\.0\.1:8080 -- restart aborted/).to_stdout
       end.to raise_error(SystemExit)
       expect(Mimic::EngineCli::Registry).not_to have_received(:for)
+    end
+  end
+
+  describe "#unload" do
+    let(:child) { Mimic::Engine::Router::Child.new("Chat-27B", 49_643) }
+    let(:router) { instance_double(Mimic::Engine::Router, running: [child], busy?: false, unload: true, wait_stopped: true) }
+
+    before do
+      stub_config
+      allow(Mimic::Engine::Router).to receive(:new).with("http://127.0.0.1:8080").and_return(router)
+      allow(Mimic::Util::Host).to receive(:gpu_free_mib).and_return(22_500)
+    end
+
+    def exit_status
+      yield
+      0
+    rescue SystemExit => e
+      e.status
+    end
+
+    it "unloads every running model and reports the free VRAM" do
+      expect { cli.unload }.to output("unloaded Chat-27B -- GPU free: 22500 MiB\n").to_stdout
+      expect(router).to have_received(:unload).with("Chat-27B")
+      expect(router).to have_received(:wait_stopped).with(["Chat-27B"])
+    end
+
+    it "says so and exits 0 when no model is loaded" do
+      allow(router).to receive(:running).and_return([])
+
+      expect { cli.unload }.to output("no model loaded\n").to_stdout
+      expect(router).not_to have_received(:unload)
+    end
+
+    it "fails when llama-server does not answer" do
+      allow(router).to receive(:running).and_return(nil)
+
+      expect(exit_status { expect { cli.unload }.to output(/llama-server is not answering/).to_stdout }).to eq(1)
+    end
+
+    it "refuses while a model is answering a request" do
+      allow(router).to receive(:busy?).with(child).and_return(true)
+
+      expect(exit_status { expect { cli.unload }.to output(/Chat-27B is answering a request -- rerun with --force/).to_stdout }).to eq(1)
+      expect(router).not_to have_received(:unload)
+    end
+
+    it "unloads a busy model with --force" do
+      allow(router).to receive(:busy?).and_return(true)
+
+      expect { described_class.new([], force: true).unload }.to output(/unloaded Chat-27B/).to_stdout
+    end
+
+    it "fails when the router refuses the unload" do
+      allow(router).to receive(:unload).and_return(false)
+
+      expect(exit_status { expect { cli.unload }.to output(/router refused to unload Chat-27B/).to_stdout }).to eq(1)
+    end
+
+    it "fails when the model is still running after the wait" do
+      allow(router).to receive(:wait_stopped).and_return(false)
+
+      expect(exit_status { expect { cli.unload }.to output(/Chat-27B still running/).to_stdout }).to eq(1)
+    end
+
+    it "points ik_llama.cpp, which has no router, at llm stop" do
+      settings = Mimic::LlmConfig::Settings.new("llama" => { "port" => 8080, "engine" => "ik_llama.cpp" })
+      allow(Mimic::LlmConfig).to receive(:load).and_return(settings)
+
+      expect(exit_status { expect { cli.unload }.to output(/ik_llama\.cpp has no router -- use `llm stop`/).to_stdout }).to eq(1)
     end
   end
 end

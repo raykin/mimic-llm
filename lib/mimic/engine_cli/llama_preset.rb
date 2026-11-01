@@ -21,6 +21,7 @@ module Mimic
         n_slots: "parallel",
         chat_template: "chat-template-file",
         mmproj: "mmproj",
+        spec_draft_model: "spec-draft-model",
         spec_type: "spec-type",
         spec_draft_n_max: "spec-draft-n-max",
         reasoning: "reasoning",
@@ -31,11 +32,13 @@ module Mimic
       # `options` is the flag surface of the binary that will read this file.
       # Nil means write every key unaudited -- the caller could not resolve a
       # binary, so there is nothing to audit against.
-      def initialize(settings, model_alias:, chat_template: nil, mtp: false, mmproj: nil, options: nil)
+      def initialize(settings, model_alias:, chat_template: nil, mtp: false, mtp_drafter: nil, mmproj: nil,
+                     options: nil)
         @settings = settings
         @model_alias = model_alias
         @chat_template = chat_template
         @mtp = mtp
+        @mtp_drafter = mtp_drafter
         @mmproj = mmproj
         @options = options
         @dropped = []
@@ -103,10 +106,11 @@ module Mimic
           n_slots: @settings.llama.n_slots,
           chat_template: @chat_template,
           mmproj: @mmproj,
+          spec_draft_model: (@mtp_drafter if @mtp),
           spec_type: ("draft-mtp" if @mtp),
-          spec_draft_n_max: (2 if @mtp),
+          spec_draft_n_max: (Engine::Base::SPEC_DRAFT_N_MAX if @mtp),
           reasoning: @settings.model.reasoning,
-          reasoning_effort: "medium",
+          reasoning_effort: @settings.model.reasoning_effort,
           load_on_startup: "true",
         }
       end

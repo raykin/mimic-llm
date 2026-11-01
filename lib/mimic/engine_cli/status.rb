@@ -1,4 +1,5 @@
 require_relative "../ui"
+require "json"
 require_relative "../util/fmt"
 require_relative "registry"
 require_relative "../engine"
@@ -29,6 +30,7 @@ module Mimic
         field("CPU MoE", cpu_moe) if cpu_moe
         field("Vision", vision_label(running))
         field("Reasoning", reasoning_label(running))
+        field("Thinking", effort_label(running))
         field("Sampling", sampling_label(running))
         field("Binary", @config.llama.binary)
       end
@@ -46,7 +48,36 @@ module Mimic
       end
 
       def reasoning_label(running)
-        (running && live_arg(:reasoning)) || @config.model.reasoning
+        mode = (running && live_arg(:reasoning)) || @config.model.reasoning
+        return mode unless mode == "auto"
+
+        chat_template.thinks? ? "on" : "off"
+      end
+
+      def effort_label(running)
+        return "off" if reasoning_label(running) == "off"
+
+        level = (running && live_effort) || @config.model.reasoning_effort
+        return level if level
+
+        default = chat_template.default_effort
+        default ? "#{default} (template default)" : "the chat template has no levels"
+      end
+
+      # llama.cpp reports --reasoning-effort; ik carries the level inside
+      # --chat-template-kwargs.
+      def live_effort
+        live_arg(:reasoning_effort) || kwargs_effort(live_arg(:chat_template_kwargs))
+      end
+
+      def kwargs_effort(json)
+        json && JSON.parse(json)["reasoning_effort"]
+      rescue JSON::ParserError
+        nil
+      end
+
+      def chat_template
+        @chat_template ||= Engine::ChatTemplate.new(@config.model.path, model_alias: @config.model.name)
       end
 
       def sampling_label(running)

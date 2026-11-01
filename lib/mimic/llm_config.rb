@@ -19,6 +19,7 @@ module Mimic
     MODEL_COMPUTE_PATH = LLM_CONFIG_DIR / "model-compute.json"
     MODEL_SAMPLING_PATH = LLM_CONFIG_DIR / "model-sampling.json"
     MODEL_ENGINE_PATH = LLM_CONFIG_DIR / "model-engine.json"
+    MODEL_EFFORT_PATH = LLM_CONFIG_DIR / "model-effort.json"
     LEGACY_CONFIG = Paths::STATE_DIR / "llm_config.yaml"
 
     BUILTIN_MODEL_DIRS = [

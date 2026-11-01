@@ -38,6 +38,71 @@ RSpec.describe Mimic::LlmCli::Wizard::Setup do
     end
   end
 
+  describe "#choose_effort" do
+    around do |example|
+      Dir.mktmpdir do |dir|
+        @effort_dir = Pathname.new(dir)
+        example.run
+      end
+    end
+
+    before do
+      stub_const("Mimic::Paths::CHAT_TEMPLATES_DIR", @effort_dir / "chat-templates")
+      stub_const("Mimic::Paths::GENERATED_TEMPLATES_DIR", @effort_dir / "chat-templates/generated")
+    end
+
+    def model_with(template)
+      path = @effort_dir / "Thinker-Q4_K_M.gguf"
+      keys = { "general.architecture" => "qwen3" }
+      keys["tokenizer.chat_template"] = template if template
+      GgufWriter.write(path, keys)
+      path.to_s
+    end
+
+    def levelled_model
+      model_with("{%- set r = reasoning_effort|default('xhigh') %}" \
+                 "{%- if resolved_reasoning_effort not in ('xhigh', 'medium', 'low') %}{%- endif %}")
+    end
+
+    def picking_prompt(answer)
+      instance_double(Mimic::Ui::Prompt).tap do |prompt|
+        allow(prompt).to receive(:select) do |_, choices, **opts|
+          @choices = choices
+          @default = opts[:default]
+          answer
+        end
+      end
+    end
+
+    it "offers the template's levels with the template's default preselected" do
+      cfg = { "model" => { "path" => levelled_model, "reasoning" => "auto" }, "llama" => {} }
+
+      config = wizard(cfg, prompt: picking_prompt("low")).choose_effort
+
+      expect(@choices).to eq(%w[xhigh medium low])
+      expect(@default).to eq("xhigh")
+      expect(config.model.reasoning_effort).to eq("low")
+    end
+
+    it "skips the picker when thinking is off" do
+      prompt = instance_double(Mimic::Ui::Prompt)
+      cfg = { "model" => { "path" => levelled_model, "reasoning" => "off" }, "llama" => {} }
+
+      config = nil
+      expect { config = wizard(cfg, prompt: prompt).choose_effort }.to output(/thinking is off/).to_stdout
+      expect(config.model.reasoning_effort).to be_nil
+    end
+
+    it "skips the picker and clears an old level when the template has no levels" do
+      prompt = instance_double(Mimic::Ui::Prompt)
+      cfg = { "model" => { "path" => model_with("{{ messages }}"), "reasoning" => "auto" }, "llama" => {} }
+
+      config = nil
+      expect { config = wizard(cfg, prompt: prompt).choose_effort }.to output(/no levels/).to_stdout
+      expect(config.model.reasoning_effort).to be_nil
+    end
+  end
+
   describe "#choose_engine" do
     def engine_prompt(picked)
       instance_double(Mimic::Ui::Prompt).tap do |prompt|
@@ -341,8 +406,8 @@ RSpec.describe Mimic::LlmCli::Wizard::Setup do
   describe "#step" do
     it "numbers steps against the total it was given" do
       instance = wizard
-      expect { instance.step("First") }.to output(%r{Step 1/6}).to_stdout
-      expect { instance.step("Second") }.to output(%r{Step 2/6}).to_stdout
+      expect { instance.step("First") }.to output(%r{Step 1/8}).to_stdout
+      expect { instance.step("Second") }.to output(%r{Step 2/8}).to_stdout
     end
 
     it "counts against a caller-supplied total" do

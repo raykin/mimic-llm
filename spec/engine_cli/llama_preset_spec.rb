@@ -16,6 +16,10 @@ RSpec.describe Mimic::EngineCli::LlamaPreset do
     }
   end
 
+  def settings_with_effort(effort, model: cfg["model"])
+    Mimic::LlmConfig::Settings.new(cfg.merge("model" => model)).tap { |s| s.model.reasoning_effort = effort }
+  end
+
   def written(model_alias: "foo", chat_template: nil, mtp: false)
     described_class.new(Mimic::LlmConfig::Settings.new(cfg), model_alias: model_alias,
                                                              chat_template: chat_template, mtp: mtp)
@@ -49,6 +53,23 @@ RSpec.describe Mimic::EngineCli::LlamaPreset do
     expect(written).to include("reasoning = auto")
   end
 
+  it "writes the thinking level picked in setup" do
+    text = described_class.new(settings_with_effort("low"), model_alias: "foo").write(@dir / "llama-models.ini").read
+
+    expect(text).to include("reasoning-effort = low")
+  end
+
+  it "leaves the level to the chat template when none was picked" do
+    expect(written).not_to include("reasoning-effort")
+  end
+
+  it "writes no level when thinking is off" do
+    settings = settings_with_effort("low", model: cfg["model"].merge("reasoning" => "off"))
+    text = described_class.new(settings, model_alias: "foo").write(@dir / "llama-models.ini").read
+
+    expect(text).not_to include("reasoning-effort")
+  end
+
   it "turns reasoning off when the choices turned it off" do
     cfg_off = cfg
     cfg_off["model"]["reasoning"] = "off"
@@ -74,7 +95,16 @@ RSpec.describe Mimic::EngineCli::LlamaPreset do
 
   it "adds the speculative-decoding keys only when MTP is on" do
     expect(written(mtp: false)).not_to include("spec-type")
-    expect(written(mtp: true)).to include("spec-type = draft-mtp", "spec-draft-n-max = 2")
+    expect(written(mtp: true)).to include("spec-type = draft-mtp", "spec-draft-n-max = 4")
+  end
+
+  it "points the draft model at a separate MTP drafter when there is one" do
+    text = described_class.new(Mimic::LlmConfig::Settings.new(cfg), model_alias: "foo", mtp: true,
+                                                                    mtp_drafter: "/mtp-foo.gguf")
+                          .write(@dir / "llama-models.ini").read
+
+    expect(text).to include("spec-draft-model = /mtp-foo.gguf", "spec-type = draft-mtp")
+    expect(written(mtp: true)).not_to include("spec-draft-model")
   end
 
   # One preset file serves every model, so a re-render has to replace it
@@ -109,8 +139,7 @@ RSpec.describe Mimic::EngineCli::LlamaPreset do
     end
 
     def audited
-      described_class.new(Mimic::LlmConfig::Settings.new(cfg), model_alias: "foo",
-                                                               options: without_reasoning_effort)
+      described_class.new(settings_with_effort("medium"), model_alias: "foo", options: without_reasoning_effort)
     end
 
     it "leaves out a key the binary does not carry" do
@@ -135,7 +164,7 @@ RSpec.describe Mimic::EngineCli::LlamaPreset do
     end
 
     it "writes every key when there is no binary to audit against" do
-      preset = described_class.new(Mimic::LlmConfig::Settings.new(cfg), model_alias: "foo")
+      preset = described_class.new(settings_with_effort("medium"), model_alias: "foo")
 
       expect(preset.write(@dir / "llama-models.ini").read).to include("reasoning-effort = medium")
       expect(preset.dropped).to be_empty

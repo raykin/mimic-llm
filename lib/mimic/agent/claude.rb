@@ -11,6 +11,12 @@ module Mimic
 
       DYNAMIC_SECTIONS_FLAG = "--exclude-dynamic-system-prompt-sections"
       MIN_DYNAMIC_SECTIONS_VERSION = [2, 1, 98].freeze
+
+      # Claude ignores a smaller CLAUDE_CODE_AUTO_COMPACT_WINDOW and warns on every launch.
+      MIN_AUTO_COMPACT_WINDOW = 100_000
+      # Claude reserves min(max output, 20k) + 3k before compacting; a cap at or above 20k gains no room.
+      COMPACT_OUTPUT_RESERVE = 20_000
+      OUTPUT_TOKEN_MAX = 32_000
       # Provider routing overrides ANTHROPIC_BASE_URL and would send the
       # session past llama-server.
       ENV_UNSET = %w[
@@ -109,6 +115,7 @@ module Mimic
       rescue JSON::ParserError
         nil
       end
+
       def model_entry
         { "id" => @settings.model.name, "context_length" => @settings.model.context_length }
       end
@@ -154,22 +161,35 @@ module Mimic
       # Claude applies user/project settings env after the process env, so
       # the local env is pinned again here, at the command-line tier, with
       # ENV_UNSET blanked.
-      def settings_overlay(model_id)
+      # A forwarded --settings (user) sits underneath: Claude keeps only the
+      # last --settings, so it is merged in rather than passed separately.
+      def settings_overlay(model_id, user = {})
         pinned = local_env(@settings.llama.base_url, Agent::AUTH_TOKEN, model_entry).except("CLAUDE_CONFIG_DIR")
-        {
+        overlay = {
           "env" => ENV_UNSET.to_h { |name| [name, ""] }.merge(
             pinned,
             "CLAUDE_CODE_ATTRIBUTION_HEADER" => "0",
             "CLAUDE_CODE_SUBAGENT_MODEL" => "inherit",
           ),
           "availableModels" => [model_id],
+          # A user's apiKeyHelper would still run and send its cloud key to llama-server.
+          "apiKeyHelper" => "",
           "permissions" => { "ask" => %w[Task Agent], "deny" => DENIED_TOOLS },
           "statusLine" => status_line,
         }
+        user.merge(
+          overlay,
+          "env" => user.fetch("env", {}).merge(overlay["env"]),
+          "permissions" => joined_permissions(user.fetch("permissions", {}), overlay["permissions"]),
+        )
       end
 
-      def flags(model_id)
-        settings = ["--settings", JSON.generate(settings_overlay(model_id))]
+      def joined_permissions(user, mimic)
+        user.merge(mimic) { |_rule, theirs, ours| theirs.is_a?(Array) ? (theirs + ours).uniq : ours }
+      end
+
+      def flags(model_id, user = {})
+        settings = ["--settings", JSON.generate(settings_overlay(model_id, user))]
         current = version
         return settings if current && !Agent.version_at_least?(current, MIN_DYNAMIC_SECTIONS_VERSION)
 
@@ -188,20 +208,57 @@ module Mimic
           "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS" => "1",
           "CLAUDE_CODE_NO_FLICKER" => "1",
         }
-        window = entry["context_length"]
+        window = entry["context_length"]&.to_i
         if window
           # Claude assumes 200k for a model id it does not know and clamps
-          # AUTO_COMPACT_WINDOW to that; MAX_CONTEXT_TOKENS sets the window.
+          # AUTO_COMPACT_WINDOW to [100k, that]; MAX_CONTEXT_TOKENS sets the window.
           env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = window.to_s
-          env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = window.to_s
+          # Blank, not omitted, below the minimum so an inherited value cannot apply.
+          env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = window >= MIN_AUTO_COMPACT_WINDOW ? window.to_s : ""
           env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] = "90"
+          output = [window / 4, OUTPUT_TOKEN_MAX].min.clamp(1..)
+          env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = output.to_s if output < COMPACT_OUTPUT_RESERVE
         end
         env.merge(extra_env)
       end
 
+      # An unreadable forwarded --settings keeps the old order: it goes
+      # first and mimic's overlay, applied last, replaces it.
       def command(model_id, extra_args)
         user_settings, rest = split_user_settings(extra_args)
+        user = read_user_settings(user_settings)
+        return ["claude", "--model", model_id, *flags(model_id, user), *rest] if user
+
         ["claude", *user_settings, "--model", model_id, *flags(model_id), *rest]
+      end
+
+      # The forwarded --settings values merged in order, each inline JSON or
+      # a file path, or nil when one cannot be read.
+      def read_user_settings(settings_args)
+        values = []
+        index = 0
+        while index < settings_args.length
+          if settings_args[index] == "--settings"
+            values << settings_args[index + 1]
+            index += 2
+          else
+            values << settings_args[index].delete_prefix("--settings=")
+            index += 1
+          end
+        end
+        values.reduce({}) do |merged, value|
+          text = value.lstrip.start_with?("{") ? value : File.read(File.expand_path(value))
+          loaded = JSON.parse(text)
+          return nil unless loaded.is_a?(Hash) && %w[env permissions].all? { |key| loaded.fetch(key, {}).is_a?(Hash) }
+
+          merged.merge(
+            loaded,
+            "env" => merged.fetch("env", {}).merge(loaded.fetch("env", {})),
+            "permissions" => merged.fetch("permissions", {}).merge(loaded.fetch("permissions", {})),
+          )
+        end
+      rescue SystemCallError, JSON::ParserError
+        nil
       end
 
       # A forwarded --settings goes before mimic's, so mimic's overlay is the

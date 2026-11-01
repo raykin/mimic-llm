@@ -1,5 +1,6 @@
 require_relative "../../lib/mimic"
 require_relative "../../lib/mimic/engine_cli/status"
+require_relative "../support/gguf_writer"
 require "tmpdir"
 
 RSpec.describe Mimic::EngineCli::Status do
@@ -120,7 +121,7 @@ RSpec.describe Mimic::EngineCli::Status do
         rendered = capture { status(cfg).print }
 
         expect(rendered).to match(/Sampling:\s+temp 1\.0/)
-        expect(rendered).to match(/Reasoning:\s+auto/)
+        expect(rendered).to match(/Reasoning:\s+off/)
         expect(rendered).to match(%r{Vision:\s+on \(mmproj-F32\.gguf\)})
       end
     end
@@ -153,6 +154,100 @@ RSpec.describe Mimic::EngineCli::Status do
         expect(rendered).not_to include("CPU MoE")
         expect(rendered).to match(/Context:\s+8,192/)
       end
+    end
+  end
+
+  describe "thinking lines" do
+    around do |example|
+      Dir.mktmpdir do |dir|
+        @root = Pathname.new(dir)
+        example.run
+      end
+    end
+
+    before do
+      stub_const("Mimic::Paths::CHAT_TEMPLATES_DIR", @root / "chat-templates")
+      stub_const("Mimic::Paths::GENERATED_TEMPLATES_DIR", @root / "chat-templates/generated")
+      stub_const("Mimic::LlmConfig::MODEL_EFFORT_PATH", @root / "model-effort.json")
+      allow(Mimic::Engine::Base).to receive(:pid_file).and_return(@root / "absent.pid")
+    end
+
+    let(:thinking_template) do
+      "{%- if enable_thinking %}{%- endif %}{%- set r = reasoning_effort|default('xhigh') %}" \
+        "{%- if r not in ('xhigh', 'medium', 'low') %}{%- endif %}"
+    end
+
+    def model_with(template)
+      path = @root / "Thinker-Q4_K_M.gguf"
+      keys = { "general.architecture" => "qwen3" }
+      keys["tokenizer.chat_template"] = template if template
+      GgufWriter.write(path, keys)
+      path.to_s
+    end
+
+    def llama_config(model_path, model = {})
+      { "model" => { "path" => model_path, "context_length" => 4096 }.merge(model),
+        "llama" => { "engine" => "llama.cpp", "cache_type" => "q8_0", "port" => 8080, "n_slots" => 1 } }
+    end
+
+    def serving(cfg, args)
+      allow(Mimic::Util::Probes).to receive(:http_json).and_return(
+        { "data" => [{ "id" => Mimic::LlmConfig::Settings.new(cfg).model.name, "status" => { "value" => "loaded", "args" => args } }] },
+      )
+    end
+
+    def stopped = allow(Mimic::Util::Probes).to receive(:http_ok).and_return(false)
+
+    it "resolves auto to on and shows the level llama.cpp was started with" do
+      cfg = llama_config(model_with(thinking_template))
+      serving(cfg, ["--ctx-size", "4096", "--reasoning", "auto", "--reasoning-effort", "low"])
+      rendered = capture { status(cfg).print }
+
+      expect(rendered).to match(/Reasoning:\s+on$/)
+      expect(rendered).to match(/Thinking:\s+low$/)
+    end
+
+    it "resolves auto to off for a template with no thinking switch" do
+      stopped
+      rendered = capture { status(llama_config(model_with("{{ messages }}"))).print }
+
+      expect(rendered).to match(/Reasoning:\s+off$/)
+      expect(rendered).to match(/Thinking:\s+off$/)
+    end
+
+    it "names the template default when no level was picked" do
+      stopped
+      rendered = capture { status(llama_config(model_with(thinking_template))).print }
+
+      expect(rendered).to match(/Thinking:\s+xhigh \(template default\)/)
+    end
+
+    it "shows the picked level when the server is stopped" do
+      stopped
+      settings = Mimic::LlmConfig::Settings.new(llama_config(model_with(thinking_template)))
+      settings.model.file.memory.effort = "medium"
+      rendered = capture { described_class.new(settings).print }
+
+      expect(rendered).to match(/Thinking:\s+medium$/)
+    end
+
+    it "says so when thinking is on but the template has no levels" do
+      stopped
+      rendered = capture { status(llama_config(model_with("{%- if enable_thinking %}{%- endif %}"))).print }
+
+      expect(rendered).to match(/Reasoning:\s+on$/)
+      expect(rendered).to match(/Thinking:\s+the chat template has no levels/)
+    end
+
+    it "reads the level out of ik's --chat-template-kwargs" do
+      record = @root / "ik-llama-launch.txt"
+      record.write(%(llama-server -c 4096 -np 1 --reasoning auto --chat-template-kwargs {"reasoning_effort":"medium"}\n))
+      stub_const("Mimic::Engine::IkLlama::LAUNCH_RECORD", record)
+      cfg = llama_config(model_with(thinking_template))
+      cfg["llama"] = cfg["llama"].merge("engine" => "ik_llama.cpp")
+      rendered = capture { status(cfg).print }
+
+      expect(rendered).to match(/Thinking:\s+medium$/)
     end
   end
 

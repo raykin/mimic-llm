@@ -1,3 +1,4 @@
+require "json"
 require_relative "../model"
 require_relative "base"
 
@@ -12,11 +13,6 @@ module Mimic
       # count.
       CPU_MOE_STEP = 2
       CPU_MOE_MAX = 28
-
-      # Tokens the MTP head drafts per verification pass. Matches the
-      # llama.cpp preset's spec_draft_n_max so a cross-engine tok/s
-      # comparison measures the engine, not the draft depth.
-      SPEC_DRAFT_N_MAX = 2
 
       OOM_MARKERS = ["cudaMalloc failed", "out of memory"].freeze
       BIND_MARKER = "couldn't bind to server socket"
@@ -46,6 +42,7 @@ module Mimic
         port: "--port",
         log_file: "--log-file",
         reasoning: "--reasoning",
+        chat_template_kwargs: "--chat-template-kwargs",
         chat_template: "--chat-template-file",
         mmproj: "--mmproj",
         n_cpu_moe: "--n-cpu-moe",
@@ -220,7 +217,13 @@ module Mimic
         # ik defaults parallel tool calls off and, unlike mainline, never
         # probes the chat template for the capability -- without this the
         # grammar allows exactly one tool call and generation ends there.
-        [binary, *flagged, "--jinja", "--metrics", "-ptcall", *@settings.model.sampling.to_args]
+        #
+        # --swa-compress sizes a sliding-window layer's cache at the window,
+        # as mainline does by default. The footprint already prices it that
+        # way. Off, gemma-4-26B-A4B at ctx 60160 held a 6866 MiB KV cache
+        # that the estimate called ~1 GiB. ik ignores it, with a warning, on
+        # an arch it does not implement.
+        [binary, *flagged, "--jinja", "--metrics", "-ptcall", "--swa-compress", *@settings.model.sampling.to_args]
       end
 
       def launch_values(n_cpu_moe)
@@ -242,6 +245,9 @@ module Mimic
           # put it beside the server log. Takes a path without the extension.
           log_file: TRACE_LOG_BASE,
           reasoning: @settings.model.reasoning,
+          # ik has no --reasoning-effort; the template reads the same variable
+          # from its kwargs.
+          chat_template_kwargs: effort_kwargs,
           chat_template: chat_template_override,
           mmproj: @settings.model.mmproj_path,
           n_cpu_moe: (n_cpu_moe if n_cpu_moe.positive?),
@@ -264,6 +270,11 @@ module Mimic
       # render_preset runs outside start (`llm status`, preset rendering), so
       # the launch-time override has to fall back to the configured answer.
       def drafting? = defined?(@drafting) ? @drafting : mtp_enabled?
+
+      def effort_kwargs
+        effort = @settings.model.reasoning_effort
+        JSON.generate("reasoning_effort" => effort) if effort
+      end
 
       def launch(binary, n_cpu_moe)
         render_preset(n_cpu_moe)

@@ -34,6 +34,33 @@ RSpec.describe Mimic::Engine::Llama do
         expect((root / "llama-models.ini").read).to include("chat-template-file = #{generated}")
       end
     end
+
+    def render_with_drafter(mtp)
+      Dir.mktmpdir do |dir|
+        root = Pathname.new(dir)
+        stub_const("Mimic::Engine::Llama::PRESET_FILE", root / "llama-models.ini")
+        stub_const("Mimic::Paths::CHAT_TEMPLATES_DIR", root / "chat-templates")
+        stub_const("Mimic::Paths::GENERATED_TEMPLATES_DIR", root / "chat-templates" / "generated")
+        model = root / "gemma-4-31B-it-Q4_K_S.gguf"
+        GgufWriter.write(model, { "general.architecture" => "gemma4" })
+        GgufWriter.write(root / "mtp-gemma-4-31B-it.gguf", { "general.architecture" => "gemma4-assistant" })
+
+        described_class.new(Mimic::LlmConfig::Settings.new(cfg.merge("model" => { "path" => model.to_s, "mtp" => mtp })))
+                       .render_preset.read.then { |text| [text, root] }
+      end
+    end
+
+    it "drafts with the drafter beside the model when mtp is auto" do
+      text, root = render_with_drafter("auto")
+
+      expect(text).to include("spec-type = draft-mtp", "spec-draft-model = #{root / 'mtp-gemma-4-31B-it.gguf'}")
+    end
+
+    it "leaves the drafter out when mtp is off" do
+      text, = render_with_drafter("off")
+
+      expect(text).not_to include("spec-type", "spec-draft-model")
+    end
   end
 
   describe "#find_binary" do

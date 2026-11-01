@@ -115,6 +115,57 @@ RSpec.describe Mimic::Engine::IkLlama do
 
       expect(described_class::LAUNCH_RECORD.read).to include("-cuda graphs=0")
     end
+
+    it "compacts the sliding-window cache" do
+      allow(Mimic::EngineCli::Registry).to receive(:binaries).and_return([])
+      stub_const("Mimic::Paths::LLM_RUN_DIR", @dir / "run")
+      stub_const("Mimic::Engine::IkLlama::LAUNCH_RECORD", @dir / "run/ik-llama-launch.txt")
+      allow(Mimic::Util::Probes).to receive(:which).and_return(nil)
+      allow(File).to receive(:file?).and_call_original
+      allow(File).to receive(:file?).with("/bin/llama-server").and_return(true)
+      settings = Mimic::LlmConfig::Settings.new(
+        { "model" => { "path" => "/m.gguf" }, "llama" => { "binary" => "/bin/llama-server" } },
+      )
+
+      described_class.new(settings).render_preset
+
+      expect(described_class::LAUNCH_RECORD.read.split).to include("--swa-compress")
+    end
+  end
+
+  describe "#render_preset and the thinking level" do
+    def launch_record(model)
+      allow(Mimic::EngineCli::Registry).to receive(:binaries).and_return([])
+      stub_const("Mimic::Paths::LLM_RUN_DIR", @dir / "run")
+      stub_const("Mimic::Engine::IkLlama::LAUNCH_RECORD", @dir / "run/ik-llama-launch.txt")
+      stub_const("Mimic::LlmConfig::MODEL_EFFORT_PATH", @dir / "model-effort.json")
+      allow(Mimic::Util::Probes).to receive(:which).and_return(nil)
+      allow(File).to receive(:file?).and_call_original
+      allow(File).to receive(:file?).with("/bin/llama-server").and_return(true)
+      settings = Mimic::LlmConfig::Settings.new({ "model" => model, "llama" => { "binary" => "/bin/llama-server" } })
+      yield settings if block_given?
+
+      described_class.new(settings).render_preset
+      described_class::LAUNCH_RECORD.read
+    end
+
+    it "hands the picked level to the template through its kwargs" do
+      record = launch_record({ "path" => "/m.gguf" }) { |settings| settings.model.reasoning_effort = "low" }
+
+      expect(record).to include(%(--chat-template-kwargs {"reasoning_effort":"low"}))
+    end
+
+    it "sends no kwargs when no level was picked" do
+      expect(launch_record({ "path" => "/m.gguf" })).not_to include("--chat-template-kwargs")
+    end
+
+    it "sends no kwargs when thinking is off" do
+      record = launch_record({ "path" => "/m.gguf", "reasoning" => "off" }) do |settings|
+        settings.model.reasoning_effort = "low"
+      end
+
+      expect(record).not_to include("--chat-template-kwargs")
+    end
   end
 
   describe "#start" do
@@ -303,7 +354,7 @@ RSpec.describe Mimic::Engine::IkLlama do
 
       described_class.new(settings).start(remember: false)
 
-      expect(described_class::LAUNCH_RECORD.read).to include("--spec-type mtp:n_max=2")
+      expect(described_class::LAUNCH_RECORD.read).to include("--spec-type mtp:n_max=4")
     end
 
     it "omits the spec stage when mtp is off" do

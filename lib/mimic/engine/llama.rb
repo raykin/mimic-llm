@@ -25,9 +25,10 @@ module Mimic
 
       def render_preset
         ensure_chat_template
+        drafter = mtp_drafter
         preset = EngineCli::LlamaPreset.new(@settings, model_alias: model_alias, chat_template: chat_template_override,
-                                                       mtp: mtp_enabled?, mmproj: @settings.model.mmproj_path,
-                                                       options: binary_options)
+                                                       mtp: mtp_enabled? || !drafter.nil?, mtp_drafter: drafter,
+                                                       mmproj: @settings.model.mmproj_path, options: binary_options)
         preset.write(PRESET_FILE)
         report_dropped(preset.dropped)
         PRESET_FILE
@@ -81,6 +82,8 @@ module Mimic
         binary = find_binary
         binary && EngineCli::BinaryOptions.new(binary)
       end
+
+      def mtp_drafter = (@settings.model.file.drafter unless mtp_off?)
 
       def report_dropped(dropped)
         return if dropped.empty?

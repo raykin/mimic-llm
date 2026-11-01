@@ -8,3 +8,4 @@ CLAUDE.md
 *.log
 *.pid
 UPSTREAM-REVIEW.md
+/session-log/

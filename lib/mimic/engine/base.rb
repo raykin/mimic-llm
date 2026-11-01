@@ -17,6 +17,11 @@ module Mimic
     class Base
       PORT_RELEASE_ATTEMPTS = 60
 
+      # Tokens the MTP head drafts per verification pass, shared by every
+      # engine so a cross-engine tok/s comparison measures the engine, not
+      # the draft depth. 4 beat 2 by 15-19% tok/s on Gemma 4 31B (2026-10-24).
+      SPEC_DRAFT_N_MAX = 4
+
       def initialize(settings)
         @settings = settings
       end
@@ -113,12 +118,14 @@ module Mimic
       end
 
       def mtp_enabled?
-        mode = @settings.model.mtp.to_s.downcase
-        return true if %w[on true 1].include?(mode)
-        return false if %w[off false 0].include?(mode)
+        return true if %w[on true 1].include?(mtp_mode)
+        return false if mtp_off?
 
         @settings.model.file.supports_mtp?
       end
+
+      def mtp_off? = %w[off false 0].include?(mtp_mode)
+      def mtp_mode = @settings.model.mtp.to_s.downcase
 
       def model_missing
         model_path = @settings.model.path

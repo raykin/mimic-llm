@@ -72,6 +72,12 @@ module Mimic
 
       def iquant? = tensor_facts["iquant"] == true
 
+      def effort = effort_store.fetch(@path)
+
+      def effort=(value)
+        value.nil? ? effort_store.delete(@path) : effort_store.write(@path, value)
+      end
+
       def mmproj = mmproj_store.fetch(@path)
 
       def mmproj=(value)
@@ -122,6 +128,7 @@ module Mimic
       def engine_store = Store.new(LlmConfig::MODEL_ENGINE_PATH)
       def packing_store = Store.new(TERNARY_PACKING_PATH)
       def mmproj_store = Store.new(LlmConfig::MODEL_MMPROJ_PATH)
+      def effort_store = Store.new(LlmConfig::MODEL_EFFORT_PATH)
     end
   end
 end

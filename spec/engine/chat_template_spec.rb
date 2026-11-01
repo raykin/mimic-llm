@@ -179,4 +179,80 @@ RSpec.describe Mimic::Engine::ChatTemplate do
       expect(build(QWEN_PREAMBLE).override_path).to be_nil
     end
   end
+
+  describe "#effort_levels / #default_effort" do
+    EFFORT_TEMPLATE = <<~JINJA.freeze
+      {%- set resolved_reasoning_effort = reasoning_effort|default('xhigh') %}
+      {%- if resolved_reasoning_effort not in ('xhigh', 'medium', 'low') %}
+          {{- raise_exception('Unexpected reasoning effort') }}
+      {%- endif %}
+    JINJA
+
+    HARMONY_TEMPLATE = <<~JINJA.freeze
+      {%- if not reasoning_effort is defined %}{%- set reasoning_effort = "medium" %}{%- endif %}
+      {{- "Reasoning: " + reasoning_effort + "\\n\\n" }}
+      {%- if add_generation_prompt %}<|start|>assistant<|channel|>analysis<|message|>{%- endif %}
+    JINJA
+
+    it "reads the levels and the default the template declares" do
+      template = build(EFFORT_TEMPLATE)
+
+      expect(template.effort_levels).to eq(%w[xhigh medium low])
+      expect(template.default_effort).to eq("xhigh")
+    end
+
+    it "falls back to the levels the template compares against" do
+      template = build(<<~JINJA)
+        {%- if reasoning_effort == 'high' %}think hard{%- elif reasoning_effort == 'low' %}think less{%- endif %}
+      JINJA
+
+      expect(template.effort_levels).to eq(%w[high low])
+      expect(template.default_effort).to be_nil
+    end
+
+    it "offers nothing for a template with no levels" do
+      template = build(QWEN_PREAMBLE)
+
+      expect(template.effort_levels).to be_empty
+      expect(template.default_effort).to be_nil
+    end
+
+    it "offers nothing for a single level, since there is no choice to make" do
+      expect(build("{%- if reasoning_effort == 'high' %}x{%- endif %}").effort_levels).to be_empty
+    end
+
+    it "offers the harmony levels for a template that only prints its fallback level" do
+      template = build(HARMONY_TEMPLATE)
+
+      expect(template.effort_levels).to eq(%w[low medium high])
+      expect(template.default_effort).to eq("medium")
+    end
+
+    it "reads a hand-written override instead of the GGUF's template" do
+      template = build(EFFORT_TEMPLATE, model_alias: "Custom")
+      @templates.mkpath
+      (@templates / "Custom.jinja").write("{%- set resolved_reasoning_effort = reasoning_effort|default('low') %}" \
+                                        "{%- if resolved_reasoning_effort not in ('low', 'high') %}{%- endif %}")
+
+      expect(template.effort_levels).to eq(%w[low high])
+      expect(template.default_effort).to eq("low")
+    end
+  end
+
+  describe "#thinks?" do
+    {
+      "an enable_thinking switch" => "{%- if enable_thinking %}<think>{%- endif %}",
+      "a <think> block with no switch" => "<|im_start|>assistant\n<think>\n",
+      "a [THINK] block" => "{{- '[THINK]' + reasoning_content + '[/THINK]' }}",
+      "harmony's analysis channel" => "<|start|>assistant<|channel|>analysis<|message|>",
+    }.each do |label, text|
+      it "is on for a template with #{label}" do
+        expect(build(text).thinks?).to be(true)
+      end
+    end
+
+    it "is off for a template with no thinking markup" do
+      expect(build(QWEN_PREAMBLE).thinks?).to be(false)
+    end
+  end
 end
