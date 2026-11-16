@@ -29,8 +29,12 @@ RSpec.describe Mimic::Agent::Codex do
     stub_const("Mimic::Paths::AGENTS_DIR", @agents_dir)
     allow(Dir).to receive(:home).and_return(@user_home.to_s)
     allow(Mimic::Util::Probes).to receive(:which).with("codex").and_return("/usr/bin/codex")
-    allow(Open3).to receive(:capture2).and_return(["0.120.0\n", instance_double(Process::Status, success?: true)])
+    allow(Open3).to receive(:capture2).and_return(["0.134.0\n", instance_double(Process::Status, success?: true)])
     allow(Mimic::Agent).to receive(:spawn_and_wait).and_return(0)
+  end
+
+  def codex_reports(version_output, success: true)
+    allow(Open3).to receive(:capture2).and_return([version_output, instance_double(Process::Status, success?: success)])
   end
 
   describe "#launch" do
@@ -40,6 +44,21 @@ RSpec.describe Mimic::Agent::Codex do
         expect { agent.launch([]) }
           .to raise_error(SystemExit) { |e| expect(e.status).to eq(1) }
       end.to output(/codex binary not found/).to_stderr
+    end
+
+    it "aborts on a codex too old to read the unsloth_api profile file" do
+      codex_reports("codex-cli 0.133.0\n")
+      expect do
+        expect { agent.launch([]) }
+          .to raise_error(SystemExit) { |e| expect(e.status).to eq(1) }
+      end.to output(%r{Codex 0\.134\.0 or newer is needed, but /usr/bin/codex is 0\.133\.0}).to_stderr
+      expect(Mimic::Agent).not_to have_received(:spawn_and_wait)
+    end
+
+    it "still launches when the codex version cannot be read" do
+      codex_reports("", success: false)
+      agent.launch([])
+      expect(Mimic::Agent).to have_received(:spawn_and_wait)
     end
 
     it "writes a config.toml with the oss_provider wiring on an empty home" do
@@ -93,6 +112,78 @@ RSpec.describe Mimic::Agent::Codex do
       expect((home / "config.toml").read).to include("untouched")
     end
 
+    def user_codex = @user_home / ".codex"
+
+    it "links the user's AGENTS.md and skills into a home that lacks them" do
+      (user_codex / "skills/demo").mkpath
+      (user_codex / "AGENTS.md").write("be brief\n")
+
+      agent.launch([])
+
+      expect((home / "AGENTS.md").read).to eq("be brief\n")
+      expect((home / "skills").realpath).to eq((user_codex / "skills").realpath)
+      expect(home / "prompts").not_to exist
+    end
+
+    # Codex appends approvals to rules/default.rules, so a linked rules
+    # folder would write the home's approvals into the user's own file.
+    it "gives a fresh home its own rules folder holding the user's rules" do
+      (user_codex / "rules").mkpath
+      (user_codex / "rules/default.rules").write("user_rule()\n")
+      (user_codex / "rules/open.rules").write("open_rule()\n")
+
+      agent.launch([])
+
+      expect(home / "rules").not_to be_symlink
+      expect((home / "rules/user-default.rules").read).to eq("user_rule()\n")
+      expect((home / "rules/open.rules").read).to eq("open_rule()\n")
+      expect(home / "rules/default.rules").not_to exist
+    end
+
+    it "adds the user's skills and rules into the folders a used home already has" do
+      (user_codex / "skills/demo").mkpath
+      (user_codex / "rules").mkpath
+      (user_codex / "rules/default.rules").write("user_rule()\n")
+      (home / "skills/.system").mkpath
+      (home / "rules").mkpath
+      (home / "rules/default.rules").write("home_rule()\n")
+
+      agent.launch([])
+
+      expect(home / "skills").not_to be_symlink
+      expect(home / "skills/.system").to be_directory
+      expect((home / "skills/demo").realpath).to eq((user_codex / "skills/demo").realpath)
+      expect((home / "rules/default.rules").read).to eq("home_rule()\n")
+      expect((home / "rules/user-default.rules").read).to eq("user_rule()\n")
+    end
+
+    # Codex skips a *.rules file that is a symlink.
+    it "puts a symlinked user rule into the home as a real file" do
+      (@user_home / "dotfile").mkpath
+      (@user_home / "dotfile/open.rules").write("open_rule()\n")
+      (user_codex / "rules").mkpath
+      (user_codex / "rules/open.rules").make_symlink(@user_home / "dotfile/open.rules")
+
+      agent.launch([])
+
+      expect(home / "rules/open.rules").not_to be_symlink
+      expect((home / "rules/open.rules").read).to eq("open_rule()\n")
+    end
+
+    it "links an entry the user adds later and drops a link whose source is gone" do
+      (user_codex / "skills/demo").mkpath
+      agent.launch([])
+      (user_codex / "AGENTS.md").write("be brief\n")
+      (user_codex / "skills/demo").rmdir
+      (user_codex / "skills").rmdir
+
+      agent.launch([])
+
+      expect((home / "AGENTS.md").read).to eq("be brief\n")
+      expect(home / "skills").not_to be_symlink
+      expect(home / "skills").not_to exist
+    end
+
     it "writes model catalog fields only when the context length is known" do
       agent.launch([])
 
@@ -135,6 +226,14 @@ RSpec.describe Mimic::Agent::Codex do
       catalog = JSON.parse((home / "model-catalog.json").read)
       entry = catalog["models"].first
       expect(entry).not_to have_key("context_window")
+    end
+
+    it "writes no context window for a context length of 0" do
+      described_class.new(settings_double(0)).launch([])
+
+      entry = JSON.parse((home / "model-catalog.json").read)["models"].first
+      expect(entry).not_to have_key("context_window")
+      expect((home / "unsloth_api.config.toml").read).not_to include("model_context_window")
     end
   end
 

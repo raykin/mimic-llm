@@ -5,7 +5,7 @@ require_relative "../llm_config"
 module Mimic
   class Model
     # What the last good run of one model used: context, measured compute
-    # buffer, sampler values, MoE offload, engine and projector. One sidecar
+    # buffer, sampler values, MoE offload and projector. One sidecar
     # JSON file per fact under ~/.llm, each keyed by resolved model path.
     class Memory
       N_CPU_MOE_PATH = Paths::LLM_ROOT / "ik-n-cpu-moe.json"
@@ -56,13 +56,6 @@ module Mimic
       def n_cpu_moe = n_cpu_moe_store.fetch(@path)
       def remember_n_cpu_moe(value) = n_cpu_moe_store.write(@path, value)
       def forget_n_cpu_moe = n_cpu_moe_store.delete(@path)
-
-      # Which engine serves this model best. Unlike the rest of Memory this
-      # is a verdict, not an observation -- llama.engine is one global key, so
-      # a sweep that visits every model has nowhere else to read a per-model
-      # choice from. Absent means nothing has judged this model yet.
-      def engine = engine_store.fetch(@path)
-      def remember_engine(value) = engine_store.write(@path, value)
 
       # Both facts live in the tensor block, which sits behind the vocab
       # array -- reaching it costs a full KV walk per model, and the setup
@@ -125,7 +118,6 @@ module Mimic
       def sampling_store = Store.new(LlmConfig::MODEL_SAMPLING_PATH)
       def compute_store = Store.new(LlmConfig::MODEL_COMPUTE_PATH)
       def n_cpu_moe_store = Store.new(N_CPU_MOE_PATH)
-      def engine_store = Store.new(LlmConfig::MODEL_ENGINE_PATH)
       def packing_store = Store.new(TERNARY_PACKING_PATH)
       def mmproj_store = Store.new(LlmConfig::MODEL_MMPROJ_PATH)
       def effort_store = Store.new(LlmConfig::MODEL_EFFORT_PATH)

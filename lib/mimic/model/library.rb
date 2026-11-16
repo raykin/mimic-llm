@@ -104,7 +104,11 @@ module Mimic
         @config.search_paths.each do |directory|
           next unless directory.directory?
 
-          Dir.glob(directory / "**/*.gguf").sort.each do |raw|
+          # Dir.glob returns each pattern's sorted matches in pattern order.
+          # `**` follows no symlinked folder, so its paths come first and win
+          # the realpath check; `*/**` adds what only a symlinked folder reaches.
+          in_directory = []
+          Dir.glob([directory / "**/*.gguf", directory / "*/**/*.gguf"]).uniq.each do |raw|
             path = Pathname.new(raw)
 
             # A dangling symlink still shows up in the glob; realpath is what
@@ -117,8 +121,9 @@ module Mimic
             next if seen[real]
 
             seen[real] = true
-            found << [path, directory]
+            in_directory << [path, directory]
           end
+          found.concat(in_directory.sort_by { |path, _| path.to_s })
         end
         Model.pair(found)
       end

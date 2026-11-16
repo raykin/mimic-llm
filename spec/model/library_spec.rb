@@ -65,6 +65,53 @@ RSpec.describe Mimic::Model::Library do
       end
     end
 
+    it "lists a model under its real path when a symlink in the same search path also reaches it" do
+      Dir.mktmpdir do |dir|
+        root = Pathname.new(dir) / "models"
+        (root / "bonsai").mkpath
+        FileUtils.touch(root / "bonsai/model.gguf")
+        (root / "alias").make_symlink(root / "bonsai")
+        stub_const("Mimic::LlmConfig::BUILTIN_MODEL_DIRS", [])
+
+        found = library({ "model" => { "search_paths" => [root.to_s] } }).all
+
+        expect(found.map { |m| m.path.to_s }).to eq([(root / "bonsai/model.gguf").to_s])
+      end
+    end
+
+    it "keeps a symlinked folder's model in name order with the rest" do
+      Dir.mktmpdir do |dir|
+        root = Pathname.new(dir) / "models"
+        elsewhere = Pathname.new(dir) / "elsewhere/bonsai"
+        (root / "zeta").mkpath
+        elsewhere.mkpath
+        FileUtils.touch(root / "zeta/model.gguf")
+        FileUtils.touch(elsewhere / "model.gguf")
+        (root / "alpha").make_symlink(elsewhere)
+        stub_const("Mimic::LlmConfig::BUILTIN_MODEL_DIRS", [])
+
+        found = library({ "model" => { "search_paths" => [root.to_s] } }).all
+
+        expect(found.map { |m| m.path.dirname.basename.to_s }).to eq(%w[alpha zeta])
+      end
+    end
+
+    it "follows a model folder that is a symlink to another disk" do
+      Dir.mktmpdir do |dir|
+        root = Pathname.new(dir) / "models"
+        elsewhere = Pathname.new(dir) / "elsewhere/bonsai"
+        root.mkpath
+        elsewhere.mkpath
+        FileUtils.touch(elsewhere / "model.gguf")
+        (root / "bonsai").make_symlink(elsewhere)
+        stub_const("Mimic::LlmConfig::BUILTIN_MODEL_DIRS", [])
+
+        found = library({ "model" => { "search_paths" => [root.to_s] } }).all
+
+        expect(found.map { |m| m.path.to_s }).to eq([(root / "bonsai/model.gguf").to_s])
+      end
+    end
+
     it "attaches an mmproj file to its model instead of listing it as one" do
       Dir.mktmpdir do |dir|
         root = Pathname.new(dir)

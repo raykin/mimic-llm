@@ -17,6 +17,8 @@ module Mimic
       # Claude reserves min(max output, 20k) + 3k before compacting; a cap at or above 20k gains no room.
       COMPACT_OUTPUT_RESERVE = 20_000
       OUTPUT_TOKEN_MAX = 32_000
+      # Tokens left free when the agent's own estimate runs low: 10% of the window, at most this.
+      COMPACT_HEADROOM_MAX = 32_768
       # Provider routing overrides ANTHROPIC_BASE_URL and would send the
       # session past llama-server.
       ENV_UNSET = %w[
@@ -209,13 +211,13 @@ module Mimic
           "CLAUDE_CODE_NO_FLICKER" => "1",
         }
         window = entry["context_length"]&.to_i
-        if window
+        if window&.positive?
           # Claude assumes 200k for a model id it does not know and clamps
           # AUTO_COMPACT_WINDOW to [100k, that]; MAX_CONTEXT_TOKENS sets the window.
           env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = window.to_s
           # Blank, not omitted, below the minimum so an inherited value cannot apply.
           env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = window >= MIN_AUTO_COMPACT_WINDOW ? window.to_s : ""
-          env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] = "90"
+          env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] = ((window - [window / 10, COMPACT_HEADROOM_MAX].min) * 100 / window).to_s
           output = [window / 4, OUTPUT_TOKEN_MAX].min.clamp(1..)
           env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = output.to_s if output < COMPACT_OUTPUT_RESERVE
         end

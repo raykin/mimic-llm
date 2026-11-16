@@ -166,6 +166,22 @@ RSpec.describe Mimic::Agent::Claude do
       expect(env).not_to have_key("CLAUDE_CODE_MAX_OUTPUT_TOKENS")
     end
 
+    it "keeps at most 32768 tokens free before compacting, so a 1M window compacts at 96%" do
+      agent = described_class.new(settings_double(1_048_576))
+      allow(described_class).to receive(:find_binary).and_return(nil)
+      allow(agent).to receive(:extra_env).and_return({})
+
+      expect(agent.env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"]).to eq("96")
+    end
+
+    it "sets no window env for a context length of 0" do
+      agent = described_class.new(settings_double(0))
+      allow(described_class).to receive(:find_binary).and_return(nil)
+      allow(agent).to receive(:extra_env).and_return({})
+
+      expect(agent.env.keys.grep(/COMPACT|CONTEXT_TOKENS/)).to be_empty
+    end
+
     it "blanks the auto-compact window below 100k, which claude ignores and warns about" do
       allow(described_class).to receive(:find_binary).and_return(nil)
       allow(agent).to receive(:extra_env).and_return({})

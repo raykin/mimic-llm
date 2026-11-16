@@ -67,14 +67,7 @@ module Mimic
         LAUNCH_RECORD
       end
 
-      # `n_cpu_moe:` forces the offload the first attempt uses, in place of the
-      # cache/preflight maximum below. It exists for `llm quality`, which
-      # scores every model at one context on a fully resident card so its
-      # numbers compare engines rather than offload depths -- an ordinary
-      # `llm start` passes nothing and keeps sizing itself. The OOM retry loop
-      # still escalates from it, so a forced 0 that genuinely does not fit
-      # recovers instead of failing.
-      def start(remember: true, n_cpu_moe: nil)
+      def start(remember: true)
         return Result.ok("ik_llama server already running") if running?
 
         binary = find_binary
@@ -89,20 +82,15 @@ module Mimic
           puts "[ik_llama] MTP would push the experts off the card at this context -- serving undrafted instead"
           @drafting = false
         end
-        forced = n_cpu_moe
-        n_cpu_moe = forced || [@settings.model.file.memory.n_cpu_moe || 0,
-                               preflight_offload(model_path, drafting: @drafting)].max
+        n_cpu_moe = [@settings.model.file.memory.n_cpu_moe || 0,
+                     preflight_offload(model_path, drafting: @drafting)].max
         loop do
           return port_busy_error("ik_llama server") unless await_port_release
 
           puts "[ik_llama] offloading MoE experts of first #{n_cpu_moe} layers to CPU" if n_cpu_moe.positive?
           pid = launch(binary, n_cpu_moe)
           if Util::Probes.wait_ready(models_url, alive: -> { Util::Probes.child_alive?(pid) }, label: "waiting for ik_llama server")
-            # The store is a ratchet the user's real setup reads back, and a
-            # forced value is a caller's choice rather than a measurement --
-            # recording it would silently undo an offload a bigger context
-            # depends on.
-            @settings.model.file.memory.remember_n_cpu_moe(n_cpu_moe) if forced.nil?
+            @settings.model.file.memory.remember_n_cpu_moe(n_cpu_moe)
             @settings.remember_ctx if remember
             @settings.remember_sampling if remember
             record_compute(pid)

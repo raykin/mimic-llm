@@ -26,10 +26,10 @@ Gem::Specification.new do |spec|
   # lib/**/* rather than lib/**/*.rb: agent/codex_fallback_prompt.md is read
   # at runtime, and a .rb-only glob leaves it out of the built gem.
   #
-  # llm_cli/dev holds the development-only commands (`llm debug`, `llm
-  # quality`). They drive benchmark and engine-shakeout harnesses that live in
-  # the stack repo and ship nowhere, so an installed gem must not advertise
-  # them; llm_cli/root.rb registers them only when this directory is present.
+  # llm_cli/dev holds the development-only command (`llm debug`). It drives
+  # local engine integration checks that ship nowhere, so an installed gem must
+  # not advertise it; llm_cli/root.rb registers it only when this directory is
+  # present.
   spec.files         = (Dir["lib/**/*", "exe/*"] - Dir["lib/mimic/llm_cli/dev/**/*"])
                        .select { |f| File.file?(f) } +
                        ["LICENSE", "NOTICE", "README.md"]

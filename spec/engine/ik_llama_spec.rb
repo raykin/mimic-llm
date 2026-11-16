@@ -211,6 +211,7 @@ RSpec.describe Mimic::Engine::IkLlama do
       expect { described_class.new(settings).start }.to output(/offloading MoE experts of first 6 layers/).to_stdout
 
       expect(described_class::LAUNCH_RECORD.read).to include("--n-cpu-moe 6")
+      expect(Mimic::Model.new("/m.gguf").memory.n_cpu_moe).to eq(6)
     end
 
     it "records what the loaded instance cost beyond the estimate" do
@@ -241,71 +242,6 @@ RSpec.describe Mimic::Engine::IkLlama do
       described_class.new(settings).start
 
       expect(described_class::LAUNCH_RECORD.read).to include("--n-cpu-moe 3")
-    end
-
-    # `llm quality` scores every model at one context on a fully resident card,
-    # so its numbers compare engines rather than offload depths. Both the
-    # cached value and the preflight would otherwise put layers on the CPU.
-    describe "n_cpu_moe: as a forced floor" do
-      it "ignores a cached offload the caller has overridden" do
-        settings = settings_for
-        stub_llama(settings, running: false, spawns: 4242)
-        Mimic::Model.new("/m.gguf").memory.remember_n_cpu_moe(8)
-        allow_any_instance_of(Mimic::Model).to receive(:footprint).and_return(
-          instance_double(Mimic::Model::Footprint, measurable?: true, fits?: true, measured_overhead_mib: nil),
-        )
-        allow(Mimic::Util::Probes).to receive(:wait_ready).and_return(true)
-
-        described_class.new(settings).start(remember: false, n_cpu_moe: 0)
-
-        expect(described_class::LAUNCH_RECORD.read).not_to include("--n-cpu-moe")
-      end
-
-      it "ignores a preflight that wants an offload" do
-        settings = settings_for
-        stub_llama(settings, running: false, spawns: 4242)
-        allow_any_instance_of(Mimic::Model).to receive(:footprint).and_return(
-          instance_double(Mimic::Model::Footprint, measurable?: true, fits?: false, layers_to_offload: 6,
-                          measured_overhead_mib: nil),
-        )
-        allow(Mimic::Util::Probes).to receive(:wait_ready).and_return(true)
-        allow_any_instance_of(Mimic::Model::Header).to receive(:block_count).and_return(40)
-
-        described_class.new(settings).start(remember: false, n_cpu_moe: 0)
-
-        expect(described_class::LAUNCH_RECORD.read).not_to include("--n-cpu-moe")
-      end
-
-      # The forced value is not a measurement, and the store is a ratchet the
-      # user's real setup reads -- writing 0 back would silently undo a cached
-      # offload that a 140K run depends on.
-      it "leaves the cached offload untouched rather than lowering it to the forced value" do
-        settings = settings_for
-        stub_llama(settings, running: false, spawns: 4242)
-        Mimic::Model.new("/m.gguf").memory.remember_n_cpu_moe(8)
-        allow_any_instance_of(Mimic::Model).to receive(:footprint).and_return(
-          instance_double(Mimic::Model::Footprint, measurable?: true, fits?: true, measured_overhead_mib: nil),
-        )
-        allow(Mimic::Util::Probes).to receive(:wait_ready).and_return(true)
-
-        described_class.new(settings).start(remember: false, n_cpu_moe: 0)
-
-        expect(Mimic::Model.new("/m.gguf").memory.n_cpu_moe).to eq(8)
-      end
-
-      it "still records what an ordinary start settled on" do
-        settings = settings_for
-        stub_llama(settings, running: false, spawns: 4242)
-        Mimic::Model.new("/m.gguf").memory.remember_n_cpu_moe(3)
-        allow_any_instance_of(Mimic::Model).to receive(:footprint).and_return(
-          instance_double(Mimic::Model::Footprint, measurable?: true, fits?: true, measured_overhead_mib: nil),
-        )
-        allow(Mimic::Util::Probes).to receive(:wait_ready).and_return(true)
-
-        described_class.new(settings).start
-
-        expect(Mimic::Model.new("/m.gguf").memory.n_cpu_moe).to eq(3)
-      end
     end
 
     it "returns an ok Result without launching when already running" do

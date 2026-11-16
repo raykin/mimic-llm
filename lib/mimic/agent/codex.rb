@@ -1,6 +1,7 @@
 require "json"
 require "pathname"
 require "open3"
+require "fileutils"
 require_relative "../paths"
 require_relative "../util/probes"
 
@@ -11,6 +12,9 @@ module Mimic
       ENV_KEY = "UNSLOTH_STUDIO_AUTH_TOKEN"
       PROVIDER_HEADER = "[model_providers.#{PROFILE}]"
       MODEL_CATALOG_MIN_VERSION = [0, 110, 0].freeze
+      # An older codex exits with "config profile `unsloth_api` not found".
+      PROFILE_FILE_MIN_VERSION = [0, 134, 0].freeze
+      USER_FILES = %w[AGENTS.md AGENTS.override.md skills rules prompts].freeze
       PATCH_LINE_ENDINGS_MIN_VERSION = [0, 148, 0].freeze
       ENV_UNSET = %w[OPENAI_API_KEY CODEX_API_KEY CODEX_ACCESS_TOKEN].freeze
       FALLBACK_PROMPT = Pathname.new(__dir__) / "codex_fallback_prompt.md"
@@ -31,10 +35,12 @@ module Mimic
         if Util::Probes.which("codex").nil? && !ENV["MIMIC_ALLOW_INSTALL"]
           abort "codex binary not found -- install it with `npm install -g @openai/codex`"
         end
+        abort_if_too_old_for_profile_file
 
         entry = model_entry
         base = @settings.llama.base_url
         seed_home
+        link_user_files
         write_config(base, entry)
         launch_env = { ENV_KEY => Agent::AUTH_TOKEN, "CODEX_HOME" => home.to_s }
         ENV_UNSET.each { |name| launch_env[name] = nil }
@@ -84,6 +90,16 @@ module Mimic
         [0]
       end
 
+      # [0] means the version could not be read, and that still launches.
+      def abort_if_too_old_for_profile_file
+        version = codex_version
+        return if version.nil? || version.size < 3 || Agent.version_at_least?(version, PROFILE_FILE_MIN_VERSION)
+
+        abort "Codex #{PROFILE_FILE_MIN_VERSION.join('.')} or newer is needed, but " \
+              "#{Util::Probes.which('codex')} is #{version.join('.')}. " \
+              "Update it with `npm install -g @openai/codex@latest`."
+      end
+
       def supports?(version, floor)
         version.nil? || Agent.version_at_least?(version, floor)
       end
@@ -112,7 +128,7 @@ module Mimic
           "supports_parallel_tool_calls" => false,
           "experimental_supported_tools" => [],
         }
-        if window
+        if window.to_i.positive?
           entry["context_window"] = window.to_i
           entry["max_context_window"] = window.to_i
         end
@@ -141,7 +157,7 @@ module Mimic
           profile_text << "model_catalog_json = #{JSON.generate(catalog.basename.to_s)}\n"
         end
         window = model["context_length"]
-        profile_text << "model_context_window = #{window.to_i}\n" if window
+        profile_text << "model_context_window = #{window.to_i}\n" if window.to_i.positive?
         profile = home / "#{PROFILE}.config.toml"
         profile.write(profile_text) if !profile.exist? || profile.read != profile_text
       end
@@ -182,6 +198,57 @@ module Mimic
         user_config = Pathname.new(Dir.home) / ".codex/config.toml"
         session.write(user_config.file? ? seed_config(user_config.read) : "")
       end
+
+      # An entry the home already has is the home's own and stays, so the
+      # commands approved in mimic sessions (rules/default.rules) are kept.
+      # Codex makes skills/.system in every home, so the user's entries go
+      # into an existing folder one by one rather than being skipped.
+      def link_user_files
+        user_codex = Pathname.new(Dir.home) / ".codex"
+        USER_FILES.each do |name|
+          source = user_codex / name
+          target = home / name
+          drop_dangling_links(target)
+          next unless source.exist?
+
+          # Codex appends approvals to rules/default.rules: a linked folder
+          # would write them into the user's own file.
+          target.mkpath if name == "rules" && source.directory? && !present?(target)
+          if !present?(target)
+            target.make_symlink(source.realpath)
+          elsif source.directory? && target.directory? && !target.symlink?
+            source.children.each { |child| add_user_child(name, child, target) }
+          end
+        end
+      end
+
+      def add_user_child(name, child, folder)
+        if name == "rules" && child.file?
+          copy_user_rule(child, folder)
+        else
+          link = folder / child.basename
+          link.make_symlink(child.realpath) unless present?(link)
+        end
+      end
+
+      # Codex skips a symlinked *.rules file, so a rule is hard-linked, or
+      # copied across disks. The home's own default.rules stays its own.
+      def copy_user_rule(rule, folder)
+        copy = folder / rule.basename
+        copy = folder / "user-#{rule.basename}" if rule.basename.to_s == "default.rules" || present?(copy)
+        return if present?(copy)
+
+        File.link(rule.realpath, copy)
+      rescue SystemCallError
+        FileUtils.cp(rule.realpath, copy)
+      end
+
+      def drop_dangling_links(target)
+        candidates = target.directory? && !target.symlink? ? target.children : [target]
+        candidates.each { |path| path.delete if path.symlink? && !path.exist? }
+      end
+
+      def present?(path) = path.exist? || path.symlink?
     end
   end
 end

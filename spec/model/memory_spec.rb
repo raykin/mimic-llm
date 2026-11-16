@@ -131,22 +131,6 @@ RSpec.describe Mimic::Model::Memory do
       expect(model.n_cpu_moe).to be_nil
     end
   end
-  describe "#engine / #remember_engine" do
-    include_context "a model-keyed store fixture"
-
-    before { stub_const("Mimic::LlmConfig::MODEL_ENGINE_PATH", store_path) }
-
-    def store_path = @dir / ".llm/model-engine.json"
-    def stored_value = "ik_llama.cpp"
-    def remember_entry(path) = memory_for(path).remember_engine(stored_value)
-    def recall_entry(path) = memory_for(path).engine
-
-    it_behaves_like "a store keyed by the resolved model path"
-
-    it "recalls nothing for a model it has never seen" do
-      expect(memory_for(@dir / "gone.gguf").engine).to be_nil
-    end
-  end
 
   describe "#mmproj / #mmproj=" do
     include_context "a model-keyed store fixture"
